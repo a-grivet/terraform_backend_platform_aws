@@ -1,0 +1,46 @@
+# waf-foundation — dev environment example
+#
+# Copy this file to dev.tfvars and fill in the values marked <...>.
+# This file is committed; dev.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=dev.tfvars
+#
+# The stack provisions a Regional WAF WebACL (eu-west-3) protecting the Cognito
+# User Pool. A separate CloudFront WAF (us-east-1) protects the upload and
+# deployment APIs via the cloudfront-foundation stack.
+
+aws_region  = "eu-west-3"
+environment = "dev"
+
+# ── Geo-blocking ────────────────────────────────────────────────────────────────
+# Requests from countries NOT in this list are blocked at the WAF edge.
+# ISO 3166-1 alpha-2 codes: https://en.wikipedia.org/wiki/ISO_3166-1_alpha-2
+
+allowed_country_codes = ["FR"]
+
+# ── Rate limiting ───────────────────────────────────────────────────────────────
+# Maximum requests per IP per 5-minute window.
+
+rate_limit_per_ip = 100
+
+# ── IP allowlist ────────────────────────────────────────────────────────────────
+# CIDR ranges that bypass all WAF rules. Typical entries:
+#   - GitLab CI runner IPs (to allow smoke tests through the WAF)
+#   - Admin workstation IPs
+# Leave empty ([]) to enforce WAF rules for all origins.
+#
+# Find the runner IP in the CI job log: "Running on runner-... via <IP>".
+
+ip_allowlist = ["<CI_RUNNER_IP>/32"]
+
+# ── Logging ─────────────────────────────────────────────────────────────────────
+
+cloudwatch_log_retention_days = 90
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "waf-foundation"
+  environment = "dev"
+}

@@ -1,0 +1,1367 @@
+# INCA Pipeline
+#
+# Manages the core INCA delivery workflow: upload-foundation, validation-foundation,
+# deployment-foundation, and learner-sandbox-roles. These stacks form the end-to-end
+# flow from package upload through Terraform validation to learner sandbox deployment.
+#
+# Cross-cutting quality jobs (format, lint, scan) cover all Terraform stacks,
+# including those in ci/api-security.yml.
+#
+# API security infrastructure (Cognito, WAF, CloudFront) lives in ci/api-security.yml,
+# which is included alongside this file by the parent pipeline trigger.
+
+include:
+  - local: ci/_templates.yml
+
+stages:
+  - validate
+  - plan
+  - apply
+  - verify
+  - destroy
+
+variables:
+  AWS_REGION: "eu-west-3"
+  AWS_ROLE_ARN_UPLOAD_DEV: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-upload-dev"
+  AWS_ROLE_ARN_UPLOAD_MAIN: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-upload-main"
+  AWS_ROLE_ARN_VALIDATION_DEV: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-validation-dev"
+  AWS_ROLE_ARN_VALIDATION_MAIN: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-validation-main"
+  AWS_ROLE_ARN_DEPLOYMENT_DEV: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-deployment-dev"
+  AWS_ROLE_ARN_DEPLOYMENT_MAIN: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-deployment-main"
+  AWS_ROLE_ARN_LEARNER_SANDBOX: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-learner-sandbox"
+  AWS_ROLE_ARN_COGNITO_DEV: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-cognito-dev"
+  AWS_ROLE_ARN_COGNITO_MAIN: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-cognito-main"
+  AWS_ROLE_ARN_WAF_DEV: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-waf-dev"
+  AWS_ROLE_ARN_WAF_MAIN: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-waf-main"
+  AWS_ROLE_ARN_CLOUDFRONT_DEV: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-cloudfront-dev"
+  AWS_ROLE_ARN_CLOUDFRONT_MAIN: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-cloudfront-main"
+
+# ===========================================================================
+# Cross-cutting quality checks
+# ===========================================================================
+#
+# These jobs cover all Terraform stacks (inca-pipeline + api-security) and all
+# Lambda source code. They run on any infrastructure or CI file change.
+
+.rules_quality:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan"'
+    - changes:
+        - Dockerfile
+        - config/**/*
+        - lambdas/**/*
+        - scripts/**/*
+        - tests/**/*
+        - terraform/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+        - ci/api-security.yml
+
+check_terraform_format:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_quality, rules]
+  script:
+    - terraform fmt -check -recursive terraform
+
+lint_terraform:
+  stage: validate
+  image:
+    name: ghcr.io/terraform-linters/tflint:v0.56.0
+    entrypoint: [""]
+  services: []
+  variables:
+    TFLINT_PLUGIN_DIR: "${CI_PROJECT_DIR}/.tflint.d/plugins"
+  cache:
+    key: "tflint-aws-ruleset-v0.40.0"
+    paths:
+      - .tflint.d/
+    policy: pull-push
+  rules: !reference [.rules_quality, rules]
+  script:
+    - |
+      PLUGIN_PATH="${TFLINT_PLUGIN_DIR}/github.com/terraform-linters/tflint-ruleset-aws/0.40.0"
+      PLUGIN_BIN="${PLUGIN_PATH}/tflint-ruleset-aws"
+      if [ ! -f "${PLUGIN_BIN}" ]; then
+        apk add --no-cache unzip
+        mkdir -p "${PLUGIN_PATH}"
+        wget -qO /tmp/tflint-ruleset-aws.zip \
+          "https://github.com/terraform-linters/tflint-ruleset-aws/releases/download/v0.40.0/tflint-ruleset-aws_linux_amd64.zip"
+        unzip /tmp/tflint-ruleset-aws.zip -d "${PLUGIN_PATH}"
+        chmod +x "${PLUGIN_BIN}"
+        rm /tmp/tflint-ruleset-aws.zip
+      fi
+    - |
+      for dir in terraform/*; do
+        if [ -d "$dir" ] && [ -f "$dir/main.tf" ]; then
+          echo "Running tflint in $dir"
+          tflint --config "${CI_PROJECT_DIR}/ci/quality/.tflint.hcl" --chdir="$dir"
+        fi
+      done
+
+# allow_failure while the baseline is established — harden to false once all
+# findings are reviewed and intentional patterns are skipped via .checkov.yaml.
+scan_terraform:
+  stage: validate
+  image:
+    name: bridgecrew/checkov:3
+    entrypoint: [""]
+  services: []
+  allow_failure: true
+  rules: !reference [.rules_quality, rules]
+  script:
+    - checkov --config-file ci/quality/.checkov.yaml --quiet --compact
+
+# ===========================================================================
+# Upload foundation
+# ===========================================================================
+
+.rules_upload:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "upload"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan"'
+    - changes:
+        - lambdas/prepare-upload/**/*
+        - lambdas/complete-upload/**/*
+        - scripts/runner/common.sh
+        - tests/integration/test_upload_foundation_flow.sh
+        - tests/fixtures/**/*
+        - terraform/upload-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+.rules_upload_dev:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "upload"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      changes:
+        - lambdas/prepare-upload/**/*
+        - lambdas/complete-upload/**/*
+        - scripts/runner/common.sh
+        - tests/integration/test_upload_foundation_flow.sh
+        - tests/fixtures/**/*
+        - terraform/upload-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+.rules_upload_main:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "upload"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master")'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - lambdas/prepare-upload/**/*
+        - lambdas/complete-upload/**/*
+        - scripts/runner/common.sh
+        - tests/integration/test_upload_foundation_flow.sh
+        - tests/fixtures/**/*
+        - terraform/upload-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+test_upload_lambdas:
+  stage: validate
+  image: python:3.12
+  services: []
+  rules: !reference [.rules_upload, rules]
+  script:
+    - python -m unittest discover -s lambdas/prepare-upload/tests
+    - python -m unittest discover -s lambdas/complete-upload/tests
+
+lint_upload_lambdas:
+  stage: validate
+  image: python:3.12
+  services: []
+  rules: !reference [.rules_upload, rules]
+  script:
+    - pip install --quiet ruff
+    - ruff check lambdas/prepare-upload/ lambdas/complete-upload/
+
+validate_upload_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_upload, rules]
+  script:
+    - terraform -chdir=terraform/upload-foundation init -backend=false
+    - terraform -chdir=terraform/upload-foundation validate
+
+plan_upload_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: test_upload_lambdas
+      optional: true
+    - job: check_terraform_format
+      optional: true
+    - job: validate_upload_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_DEV}"
+  rules: !reference [.rules_upload_dev, rules]
+  script:
+    - terraform -chdir=terraform/upload-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/upload-foundation plan -var-file=dev.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/upload-foundation show -no-color tfplan > terraform/upload-foundation/tfplan.txt
+    - terraform -chdir=terraform/upload-foundation show -json tfplan > terraform/upload-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/upload-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/upload-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/upload-foundation/plan-metadata.txt
+      Upload foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "upload-foundation-dev-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/upload-foundation/tfplan.json
+    paths:
+      - terraform/upload-foundation/tfplan
+      - terraform/upload-foundation/tfplan.txt
+      - terraform/upload-foundation/tfplan.json
+      - terraform/upload-foundation/plan-metadata.env
+      - terraform/upload-foundation/plan-metadata.txt
+      - terraform/upload-foundation/prepare-template-upload.zip
+      - terraform/upload-foundation/complete-template-upload.zip
+
+plan_upload_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: test_upload_lambdas
+      optional: true
+    - job: check_terraform_format
+      optional: true
+    - job: validate_upload_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_MAIN}"
+  rules: !reference [.rules_upload_main, rules]
+  script:
+    - terraform -chdir=terraform/upload-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/upload-foundation plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/upload-foundation show -no-color tfplan > terraform/upload-foundation/tfplan.txt
+    - terraform -chdir=terraform/upload-foundation show -json tfplan > terraform/upload-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/upload-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/upload-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/upload-foundation/plan-metadata.txt
+      Upload foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "upload-foundation-main-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/upload-foundation/tfplan.json
+    paths:
+      - terraform/upload-foundation/tfplan
+      - terraform/upload-foundation/tfplan.txt
+      - terraform/upload-foundation/tfplan.json
+      - terraform/upload-foundation/plan-metadata.env
+      - terraform/upload-foundation/plan-metadata.txt
+      - terraform/upload-foundation/prepare-template-upload.zip
+      - terraform/upload-foundation/complete-template-upload.zip
+
+apply_upload_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-upload-dev
+  environment:
+    name: dev/upload
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "upload")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_upload_dev" "terraform/upload-foundation/plan-metadata.env" "terraform/upload-foundation/tfplan"
+    - terraform -chdir=terraform/upload-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/upload-foundation apply -input=false tfplan
+    - echo "API_URL=$(terraform -chdir=terraform/upload-foundation output -raw upload_http_api_endpoint)" > terraform/upload-foundation/deploy_outputs.env
+    - echo "UPLOAD_INTENTS_TABLE_NAME=$(terraform -chdir=terraform/upload-foundation output -raw upload_intents_table_name)" >> terraform/upload-foundation/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/upload-foundation/deploy_outputs.env
+    expire_in: 1 day
+
+apply_upload_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-upload-main
+  environment:
+    name: main/upload
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "upload")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_upload_main" "terraform/upload-foundation/plan-metadata.env" "terraform/upload-foundation/tfplan"
+    - terraform -chdir=terraform/upload-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/upload-foundation apply -input=false tfplan
+    - echo "API_URL=$(terraform -chdir=terraform/upload-foundation output -raw upload_http_api_endpoint)" > terraform/upload-foundation/deploy_outputs.env
+    - echo "UPLOAD_INTENTS_TABLE_NAME=$(terraform -chdir=terraform/upload-foundation output -raw upload_intents_table_name)" >> terraform/upload-foundation/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/upload-foundation/deploy_outputs.env
+    expire_in: 1 day
+
+smoke_test_upload_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: verify
+  needs:
+    - job: apply_upload_dev
+      artifacts: true
+  when: on_success
+  allow_failure: false
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "upload")'
+    - when: never
+  script:
+    - apk add --no-cache bash curl jq zip
+    - bash tests/integration/test_upload_foundation_flow.sh tests/fixtures/blueprints/success-aws-lab
+
+smoke_test_upload_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: verify
+  needs:
+    - job: apply_upload_main
+      artifacts: true
+  when: on_success
+  allow_failure: false
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "upload")'
+    - when: never
+  script:
+    - apk add --no-cache bash curl jq zip
+    - bash tests/integration/test_upload_foundation_flow.sh tests/fixtures/blueprints/success-aws-lab
+
+destroy_upload_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs:
+    - job: destroy_validation_dev
+      optional: true
+  allow_failure: false
+  resource_group: terraform-upload-dev
+  environment:
+    name: dev/upload
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "upload"'
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-DEV" || (echo "Set CONFIRMATION=DESTROY-DEV to confirm upload dev destruction" && exit 1)
+    - terraform -chdir=terraform/upload-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/upload-foundation destroy -var-file=dev.tfvars -input=false -auto-approve
+
+destroy_upload_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs: []
+  allow_failure: false
+  resource_group: terraform-upload-main
+  environment:
+    name: main/upload
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && $TARGET_STACK == "upload"'
+    - if: '$PIPELINE_ACTION == "destroy" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-PROD" || (echo "Set CONFIRMATION=DESTROY-PROD to confirm upload main destruction" && exit 1)
+    - terraform -chdir=terraform/upload-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/upload-foundation destroy -var-file=main.tfvars -input=false -auto-approve
+
+# ===========================================================================
+# Validation foundation
+# ===========================================================================
+
+.rules_validation:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "validation"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan"'
+    - changes:
+        - Dockerfile
+        - config/**/*
+        - scripts/**/*
+        - tests/fixtures/**/*
+        - terraform/validation-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+.rules_validation_dev:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "validation"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      changes:
+        - Dockerfile
+        - config/**/*
+        - scripts/**/*
+        - tests/fixtures/**/*
+        - terraform/validation-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+.rules_validation_main:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "validation"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master")'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - Dockerfile
+        - config/**/*
+        - scripts/**/*
+        - tests/fixtures/**/*
+        - terraform/validation-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+validate_validation_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_validation, rules]
+  script:
+    - terraform -chdir=terraform/validation-foundation init -backend=false
+    - terraform -chdir=terraform/validation-foundation validate
+
+plan_validation_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_validation_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_VALIDATION_DEV}"
+    TF_VAR_environment: "dev"
+  rules: !reference [.rules_validation_dev, rules]
+  script:
+    - |
+      RUNNER_SHA=$(aws ecr describe-images \
+        --region "${AWS_REGION}" \
+        --repository-name inca-terraform-runner \
+        --image-ids imageTag=dev \
+        --query 'imageDetails[0].imageTags[]' \
+        --output text | tr '\t' '\n' | grep -E '^[0-9a-f]{40}$' | head -1)
+      if [ -z "${RUNNER_SHA}" ]; then
+        echo "ERROR: Could not resolve 40-char SHA tag for runner image :dev. Run the runner image pipeline first."
+        exit 1
+      fi
+      export TF_VAR_validation_runner_image_tag="${RUNNER_SHA}"
+      echo "Using runner image SHA: ${RUNNER_SHA}"
+    - terraform -chdir=terraform/validation-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/validation-foundation plan -var-file=dev.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/validation-foundation show -no-color tfplan > terraform/validation-foundation/tfplan.txt
+    - terraform -chdir=terraform/validation-foundation show -json tfplan > terraform/validation-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/validation-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/validation-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/validation-foundation/plan-metadata.txt
+      Validation foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "validation-foundation-dev-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/validation-foundation/tfplan.json
+    paths:
+      - terraform/validation-foundation/tfplan
+      - terraform/validation-foundation/tfplan.txt
+      - terraform/validation-foundation/tfplan.json
+      - terraform/validation-foundation/plan-metadata.env
+      - terraform/validation-foundation/plan-metadata.txt
+
+plan_validation_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_validation_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_VALIDATION_MAIN}"
+    TF_VAR_environment: "main"
+  rules: !reference [.rules_validation_main, rules]
+  script:
+    - |
+      RUNNER_SHA=$(aws ecr describe-images \
+        --region "${AWS_REGION}" \
+        --repository-name inca-terraform-runner \
+        --image-ids imageTag=main \
+        --query 'imageDetails[0].imageTags[]' \
+        --output text | tr '\t' '\n' | grep -E '^[0-9a-f]{40}$' | head -1)
+      if [ -z "${RUNNER_SHA}" ]; then
+        echo "ERROR: Could not resolve 40-char SHA tag for runner image :main. Run the runner image pipeline first."
+        exit 1
+      fi
+      export TF_VAR_validation_runner_image_tag="${RUNNER_SHA}"
+      echo "Using runner image SHA: ${RUNNER_SHA}"
+    - terraform -chdir=terraform/validation-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/validation-foundation plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/validation-foundation show -no-color tfplan > terraform/validation-foundation/tfplan.txt
+    - terraform -chdir=terraform/validation-foundation show -json tfplan > terraform/validation-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/validation-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/validation-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/validation-foundation/plan-metadata.txt
+      Validation foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "validation-foundation-main-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/validation-foundation/tfplan.json
+    paths:
+      - terraform/validation-foundation/tfplan
+      - terraform/validation-foundation/tfplan.txt
+      - terraform/validation-foundation/tfplan.json
+      - terraform/validation-foundation/plan-metadata.env
+      - terraform/validation-foundation/plan-metadata.txt
+
+apply_validation_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-validation-dev
+  environment:
+    name: dev/validation
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_VALIDATION_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "validation")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_validation_dev" "terraform/validation-foundation/plan-metadata.env" "terraform/validation-foundation/tfplan"
+    - terraform -chdir=terraform/validation-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/validation-foundation apply -input=false tfplan
+
+apply_validation_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-validation-main
+  environment:
+    name: main/validation
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_VALIDATION_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "validation")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_validation_main" "terraform/validation-foundation/plan-metadata.env" "terraform/validation-foundation/tfplan"
+    - terraform -chdir=terraform/validation-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/validation-foundation apply -input=false tfplan
+
+smoke_test_validation_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: verify
+  needs:
+    - job: apply_validation_dev
+      artifacts: false
+  when: on_success
+  allow_failure: false
+  # Reads terraform/upload-foundation state to get the API URL — upload role required.
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "validation")'
+    - when: never
+  script:
+    - apk add --no-cache bash curl jq zip
+    - terraform -chdir=terraform/upload-foundation init -backend-config=backend-dev.hcl
+    - export API_URL="$(terraform -chdir=terraform/upload-foundation output -raw upload_http_api_endpoint)"
+    - export UPLOAD_INTENTS_TABLE_NAME="$(terraform -chdir=terraform/upload-foundation output -raw upload_intents_table_name)"
+    - bash tests/integration/test_validation_foundation_flow.sh tests/fixtures/blueprints/success-aws-lab READY 180
+
+smoke_test_validation_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: verify
+  needs:
+    - job: apply_validation_main
+      artifacts: false
+  when: on_success
+  allow_failure: false
+  # Reads terraform/upload-foundation state to get the API URL — upload role required.
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_UPLOAD_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "validation")'
+    - when: never
+  script:
+    - apk add --no-cache bash curl jq zip
+    - terraform -chdir=terraform/upload-foundation init -backend-config=backend-main.hcl
+    - export API_URL="$(terraform -chdir=terraform/upload-foundation output -raw upload_http_api_endpoint)"
+    - export UPLOAD_INTENTS_TABLE_NAME="$(terraform -chdir=terraform/upload-foundation output -raw upload_intents_table_name)"
+    - bash tests/integration/test_validation_foundation_flow.sh tests/fixtures/blueprints/success-aws-lab READY 180
+
+destroy_validation_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs:
+    - job: destroy_deployment_dev
+      optional: true
+  allow_failure: false
+  resource_group: terraform-validation-dev
+  environment:
+    name: dev/validation
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_VALIDATION_DEV}"
+    TF_VAR_environment: "dev"
+    TF_VAR_validation_runner_image_tag: "${CI_COMMIT_SHA}"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "validation"'
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-DEV" || (echo "Set CONFIRMATION=DESTROY-DEV to confirm validation dev destruction" && exit 1)
+    - terraform -chdir=terraform/validation-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/validation-foundation destroy -var-file=dev.tfvars -input=false -auto-approve
+
+destroy_validation_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs: []
+  allow_failure: false
+  resource_group: terraform-validation-main
+  environment:
+    name: main/validation
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_VALIDATION_MAIN}"
+    TF_VAR_environment: "main"
+    TF_VAR_validation_runner_image_tag: "${CI_COMMIT_SHA}"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && $TARGET_STACK == "validation"'
+    - if: '$PIPELINE_ACTION == "destroy" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-PROD" || (echo "Set CONFIRMATION=DESTROY-PROD to confirm validation main destruction" && exit 1)
+    - terraform -chdir=terraform/validation-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/validation-foundation destroy -var-file=main.tfvars -input=false -auto-approve
+
+# ===========================================================================
+# Deployment foundation
+# ===========================================================================
+
+.rules_deployment:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "deployment"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan"'
+    - changes:
+        - lambdas/trigger-deployment/**/*
+        - terraform/deployment-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+.rules_deployment_dev:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "deployment"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      changes:
+        - lambdas/trigger-deployment/**/*
+        - terraform/deployment-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+.rules_deployment_main:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "deployment"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master")'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - lambdas/trigger-deployment/**/*
+        - terraform/deployment-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+test_deployment_lambdas:
+  stage: validate
+  image: python:3.12
+  services: []
+  rules: !reference [.rules_deployment, rules]
+  script:
+    - python -m unittest discover -s lambdas/trigger-deployment/tests
+
+lint_deployment_lambdas:
+  stage: validate
+  image: python:3.12
+  services: []
+  rules: !reference [.rules_deployment, rules]
+  script:
+    - pip install --quiet ruff
+    - ruff check lambdas/trigger-deployment/
+
+validate_deployment_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_deployment, rules]
+  script:
+    - terraform -chdir=terraform/deployment-foundation init -backend=false
+    - terraform -chdir=terraform/deployment-foundation validate
+
+plan_deployment_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: test_deployment_lambdas
+      optional: true
+    - job: check_terraform_format
+      optional: true
+    - job: validate_deployment_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_DEPLOYMENT_DEV}"
+    TF_VAR_environment: "dev"
+  rules: !reference [.rules_deployment_dev, rules]
+  script:
+    - |
+      RUNNER_SHA=$(aws ecr describe-images \
+        --region "${AWS_REGION}" \
+        --repository-name inca-terraform-runner \
+        --image-ids imageTag=dev \
+        --query 'imageDetails[0].imageTags[]' \
+        --output text | tr '\t' '\n' | grep -E '^[0-9a-f]{40}$' | head -1)
+      if [ -z "${RUNNER_SHA}" ]; then
+        echo "ERROR: Could not resolve 40-char SHA tag for runner image :dev. Run the runner image pipeline first."
+        exit 1
+      fi
+      export TF_VAR_deployment_runner_image_tag="${RUNNER_SHA}"
+      echo "Using runner image SHA: ${RUNNER_SHA}"
+    - terraform -chdir=terraform/deployment-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/deployment-foundation plan -var-file=dev.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/deployment-foundation show -no-color tfplan > terraform/deployment-foundation/tfplan.txt
+    - terraform -chdir=terraform/deployment-foundation show -json tfplan > terraform/deployment-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/deployment-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/deployment-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/deployment-foundation/plan-metadata.txt
+      Deployment foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "deployment-foundation-dev-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/deployment-foundation/tfplan.json
+    paths:
+      - terraform/deployment-foundation/tfplan
+      - terraform/deployment-foundation/tfplan.txt
+      - terraform/deployment-foundation/tfplan.json
+      - terraform/deployment-foundation/plan-metadata.env
+      - terraform/deployment-foundation/plan-metadata.txt
+      - terraform/deployment-foundation/trigger-deployment.zip
+
+apply_deployment_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs:
+    # Cognito must be applied first so its remote state is available when
+    # the deployment plan is refreshed. optional: true allows TARGET_STACK=deployment
+    # runs where apply_cognito_dev is not triggered (cognito must already exist).
+    - job: apply_cognito_dev
+      optional: true
+      artifacts: false
+  allow_failure: false
+  resource_group: terraform-deployment-dev
+  environment:
+    name: dev/deployment
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_DEPLOYMENT_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "deployment")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    # Verify the saved plan matches the current commit before re-planning.
+    - download_and_validate_plan_artifact "plan_deployment_dev" "terraform/deployment-foundation/plan-metadata.env" "terraform/deployment-foundation/tfplan"
+    - terraform -chdir=terraform/deployment-foundation init -backend-config=backend-dev.hcl
+    # Re-plan with fresh state so cognito remote state outputs are captured.
+    # The saved plan is used only for commit-SHA verification above.
+    - |
+      RUNNER_SHA=$(aws ecr describe-images \
+        --region "${AWS_REGION}" \
+        --repository-name inca-terraform-runner \
+        --image-ids imageTag=dev \
+        --query 'imageDetails[0].imageTags[]' \
+        --output text | tr '\t' '\n' | grep -E '^[0-9a-f]{40}$' | head -1)
+      if [ -z "${RUNNER_SHA}" ]; then
+        echo "ERROR: Could not resolve SHA tag for runner image :dev. Run the runner image pipeline first."
+        exit 1
+      fi
+      export TF_VAR_deployment_runner_image_tag="${RUNNER_SHA}"
+    - terraform -chdir=terraform/deployment-foundation plan -var-file=dev.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/deployment-foundation apply -input=false tfplan
+    - echo "DEPLOYMENT_API_URL=$(terraform -chdir=terraform/deployment-foundation output -raw deployment_api_endpoint)" > terraform/deployment-foundation/deploy_outputs.env
+    - echo "DEPLOYMENT_STATE_MACHINE_ARN=$(terraform -chdir=terraform/deployment-foundation output -raw deployment_state_machine_arn)" >> terraform/deployment-foundation/deploy_outputs.env
+    - echo "ECS_TASK_ROLE_ARN=$(terraform -chdir=terraform/deployment-foundation output -raw ecs_task_role_arn)" >> terraform/deployment-foundation/deploy_outputs.env
+    - |
+      COGNITO_USER_POOL_ID="$(terraform -chdir=terraform/deployment-foundation output -raw cognito_user_pool_id)"
+      COGNITO_CLIENT_ID="$(terraform -chdir=terraform/deployment-foundation output -raw cognito_client_id)"
+      if [ -z "${COGNITO_USER_POOL_ID}" ] || [ -z "${COGNITO_CLIENT_ID}" ]; then
+        echo "ERROR: Cognito outputs are empty — cognito must be applied before deployment foundation"
+        exit 1
+      fi
+      echo "COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}" >> terraform/deployment-foundation/deploy_outputs.env
+      echo "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" >> terraform/deployment-foundation/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/deployment-foundation/deploy_outputs.env
+    expire_in: 1 day
+
+smoke_test_deployment_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: verify
+  needs:
+    - job: apply_deployment_dev
+      artifacts: true
+    - job: apply_upload_dev
+      artifacts: true
+  when: on_success
+  allow_failure: false
+  # API_URL and UPLOAD_INTENTS_TABLE_NAME come from apply_upload_dev dotenv.
+  # DEPLOYMENT_API_URL, DEPLOYMENT_STATE_MACHINE_ARN, COGNITO_* come from apply_deployment_dev dotenv.
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_DEPLOYMENT_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "deployment")'
+    - when: never
+  script:
+    - apk add --no-cache bash curl jq zip
+    - bash tests/integration/test_deployment_foundation_flow.sh tests/fixtures/blueprints/minimal-deploy-lab 300
+
+plan_deployment_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: test_deployment_lambdas
+      optional: true
+    - job: check_terraform_format
+      optional: true
+    - job: validate_deployment_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_DEPLOYMENT_MAIN}"
+    TF_VAR_environment: "main"
+  rules: !reference [.rules_deployment_main, rules]
+  script:
+    - |
+      RUNNER_SHA=$(aws ecr describe-images \
+        --region "${AWS_REGION}" \
+        --repository-name inca-terraform-runner \
+        --image-ids imageTag=main \
+        --query 'imageDetails[0].imageTags[]' \
+        --output text | tr '\t' '\n' | grep -E '^[0-9a-f]{40}$' | head -1)
+      if [ -z "${RUNNER_SHA}" ]; then
+        echo "ERROR: Could not resolve 40-char SHA tag for runner image :main. Run the runner image pipeline first."
+        exit 1
+      fi
+      export TF_VAR_deployment_runner_image_tag="${RUNNER_SHA}"
+      echo "Using runner image SHA: ${RUNNER_SHA}"
+    - terraform -chdir=terraform/deployment-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/deployment-foundation plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/deployment-foundation show -no-color tfplan > terraform/deployment-foundation/tfplan.txt
+    - terraform -chdir=terraform/deployment-foundation show -json tfplan > terraform/deployment-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/deployment-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/deployment-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/deployment-foundation/plan-metadata.txt
+      Deployment foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "deployment-foundation-main-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/deployment-foundation/tfplan.json
+    paths:
+      - terraform/deployment-foundation/tfplan
+      - terraform/deployment-foundation/tfplan.txt
+      - terraform/deployment-foundation/tfplan.json
+      - terraform/deployment-foundation/plan-metadata.env
+      - terraform/deployment-foundation/plan-metadata.txt
+      - terraform/deployment-foundation/trigger-deployment.zip
+
+apply_deployment_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs:
+    # Cognito and validation must be applied first so their remote state outputs
+    # are available when the deployment plan is refreshed. optional: true allows
+    # TARGET_STACK=deployment runs where these stacks are already applied.
+    - job: apply_cognito_main
+      optional: true
+      artifacts: false
+    - job: apply_validation_main
+      optional: true
+      artifacts: false
+  allow_failure: false
+  resource_group: terraform-deployment-main
+  environment:
+    name: main/deployment
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_DEPLOYMENT_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "deployment")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    # Verify the saved plan matches the current commit before re-planning.
+    - download_and_validate_plan_artifact "plan_deployment_main" "terraform/deployment-foundation/plan-metadata.env" "terraform/deployment-foundation/tfplan"
+    - terraform -chdir=terraform/deployment-foundation init -backend-config=backend-main.hcl
+    # Re-plan with fresh state so cognito and validation remote state outputs are captured.
+    # The saved plan is used only for commit-SHA verification above.
+    - |
+      RUNNER_SHA=$(aws ecr describe-images \
+        --region "${AWS_REGION}" \
+        --repository-name inca-terraform-runner \
+        --image-ids imageTag=main \
+        --query 'imageDetails[0].imageTags[]' \
+        --output text | tr '\t' '\n' | grep -E '^[0-9a-f]{40}$' | head -1)
+      if [ -z "${RUNNER_SHA}" ]; then
+        echo "ERROR: Could not resolve SHA tag for runner image :main. Run the runner image pipeline first."
+        exit 1
+      fi
+      export TF_VAR_deployment_runner_image_tag="${RUNNER_SHA}"
+    - terraform -chdir=terraform/deployment-foundation plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/deployment-foundation apply -input=false tfplan
+    - echo "DEPLOYMENT_API_URL=$(terraform -chdir=terraform/deployment-foundation output -raw deployment_api_endpoint)" > terraform/deployment-foundation/deploy_outputs.env
+    - echo "DEPLOYMENT_STATE_MACHINE_ARN=$(terraform -chdir=terraform/deployment-foundation output -raw deployment_state_machine_arn)" >> terraform/deployment-foundation/deploy_outputs.env
+    - echo "ECS_TASK_ROLE_ARN=$(terraform -chdir=terraform/deployment-foundation output -raw ecs_task_role_arn)" >> terraform/deployment-foundation/deploy_outputs.env
+    - |
+      COGNITO_USER_POOL_ID="$(terraform -chdir=terraform/deployment-foundation output -raw cognito_user_pool_id)"
+      COGNITO_CLIENT_ID="$(terraform -chdir=terraform/deployment-foundation output -raw cognito_client_id)"
+      if [ -z "${COGNITO_USER_POOL_ID}" ] || [ -z "${COGNITO_CLIENT_ID}" ]; then
+        echo "ERROR: Cognito outputs are empty — apply the cognito stack before the deployment foundation"
+        exit 1
+      fi
+      echo "COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}" >> terraform/deployment-foundation/deploy_outputs.env
+      echo "COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}" >> terraform/deployment-foundation/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/deployment-foundation/deploy_outputs.env
+    expire_in: 1 day
+
+smoke_test_deployment_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: verify
+  needs:
+    - job: apply_deployment_main
+      artifacts: true
+    - job: apply_upload_main
+      artifacts: true
+  when: on_success
+  allow_failure: false
+  # API_URL and UPLOAD_INTENTS_TABLE_NAME come from apply_upload_main dotenv.
+  # DEPLOYMENT_API_URL, DEPLOYMENT_STATE_MACHINE_ARN, COGNITO_* come from apply_deployment_main dotenv.
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_DEPLOYMENT_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "deployment")'
+    - when: never
+  script:
+    - apk add --no-cache bash curl jq zip
+    - bash tests/integration/test_deployment_foundation_flow.sh tests/fixtures/blueprints/minimal-deploy-lab 300
+
+destroy_deployment_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs:
+    - job: destroy_cloudfront_dev
+      optional: true
+  allow_failure: false
+  resource_group: terraform-deployment-dev
+  environment:
+    name: dev/deployment
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_DEPLOYMENT_DEV}"
+    TF_VAR_environment: "dev"
+    TF_VAR_deployment_runner_image_tag: "${CI_COMMIT_SHA}"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "deployment"'
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-DEV" || (echo "Set CONFIRMATION=DESTROY-DEV to confirm deployment dev destruction" && exit 1)
+    - terraform -chdir=terraform/deployment-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/deployment-foundation destroy -var-file=dev.tfvars -input=false -auto-approve
+
+# ===========================================================================
+# Learner sandbox roles
+# ===========================================================================
+
+.rules_learner_sandbox:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "learner-sandbox"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan"'
+    - changes:
+        - terraform/learner-sandbox-roles/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+.rules_learner_sandbox_dev:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "learner-sandbox"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      changes:
+        - terraform/learner-sandbox-roles/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+.rules_learner_sandbox_main:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "learner-sandbox"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master")'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - terraform/learner-sandbox-roles/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+
+validate_learner_sandbox_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_learner_sandbox, rules]
+  script:
+    - terraform -chdir=terraform/learner-sandbox-roles init -backend=false
+    - terraform -chdir=terraform/learner-sandbox-roles validate
+
+plan_learner_sandbox_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_learner_sandbox_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_LEARNER_SANDBOX}"
+    TF_VAR_environment: "dev"
+  rules: !reference [.rules_learner_sandbox_dev, rules]
+  script:
+    - terraform -chdir=terraform/learner-sandbox-roles init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/learner-sandbox-roles plan -var-file=dev.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/learner-sandbox-roles show -no-color tfplan > terraform/learner-sandbox-roles/tfplan.txt
+    - terraform -chdir=terraform/learner-sandbox-roles show -json tfplan > terraform/learner-sandbox-roles/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/learner-sandbox-roles/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/learner-sandbox-roles/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/learner-sandbox-roles/plan-metadata.txt
+      Learner sandbox roles plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "learner-sandbox-roles-dev-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/learner-sandbox-roles/tfplan.json
+    paths:
+      - terraform/learner-sandbox-roles/tfplan
+      - terraform/learner-sandbox-roles/tfplan.txt
+      - terraform/learner-sandbox-roles/tfplan.json
+      - terraform/learner-sandbox-roles/plan-metadata.env
+      - terraform/learner-sandbox-roles/plan-metadata.txt
+
+apply_learner_sandbox_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-learner-sandbox
+  environment:
+    name: dev/learner-sandbox
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_LEARNER_SANDBOX}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "learner-sandbox")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_learner_sandbox_dev" "terraform/learner-sandbox-roles/plan-metadata.env" "terraform/learner-sandbox-roles/tfplan"
+    - terraform -chdir=terraform/learner-sandbox-roles init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/learner-sandbox-roles apply -input=false tfplan
+
+plan_learner_sandbox_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_learner_sandbox_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_LEARNER_SANDBOX}"
+    TF_VAR_environment: "main"
+  rules: !reference [.rules_learner_sandbox_main, rules]
+  script:
+    - terraform -chdir=terraform/learner-sandbox-roles init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/learner-sandbox-roles plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/learner-sandbox-roles show -no-color tfplan > terraform/learner-sandbox-roles/tfplan.txt
+    - terraform -chdir=terraform/learner-sandbox-roles show -json tfplan > terraform/learner-sandbox-roles/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/learner-sandbox-roles/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/learner-sandbox-roles/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/learner-sandbox-roles/plan-metadata.txt
+      Learner sandbox roles plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "learner-sandbox-roles-main-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/learner-sandbox-roles/tfplan.json
+    paths:
+      - terraform/learner-sandbox-roles/tfplan
+      - terraform/learner-sandbox-roles/tfplan.txt
+      - terraform/learner-sandbox-roles/tfplan.json
+      - terraform/learner-sandbox-roles/plan-metadata.env
+      - terraform/learner-sandbox-roles/plan-metadata.txt
+
+apply_learner_sandbox_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-learner-sandbox-main
+  environment:
+    name: main/learner-sandbox
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_LEARNER_SANDBOX}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "learner-sandbox")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_learner_sandbox_main" "terraform/learner-sandbox-roles/plan-metadata.env" "terraform/learner-sandbox-roles/tfplan"
+    - terraform -chdir=terraform/learner-sandbox-roles init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/learner-sandbox-roles apply -input=false tfplan
+
+destroy_learner_sandbox_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs: []
+  allow_failure: false
+  resource_group: terraform-learner-sandbox
+  environment:
+    name: dev/learner-sandbox
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_LEARNER_SANDBOX}"
+    TF_VAR_environment: "dev"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "learner-sandbox"'
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-DEV" || (echo "Set CONFIRMATION=DESTROY-DEV to confirm learner sandbox destruction" && exit 1)
+    - terraform -chdir=terraform/learner-sandbox-roles init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/learner-sandbox-roles destroy -var-file=dev.tfvars -input=false -auto-approve

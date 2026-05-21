@@ -1,0 +1,27 @@
+# cognito — main environment example
+#
+# Copy this file to main.tfvars and fill in the values marked <...>.
+# This file is committed; main.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=main.tfvars
+#
+# The stack provisions a Cognito User Pool and App Client used by the deployment
+# API to authenticate requests. The WAF foundation attaches a WebACL to this pool.
+#
+# Test users must NOT be stored here — pass them via TF_VAR_test_users or a
+# gitignored override file (main.tfvars.local) to avoid committing credentials.
+# See cognito/dev.tfvars.example for the test_users schema.
+
+aws_region  = "eu-west-3"
+environment = "main"
+
+password_minimum_length          = 12
+temporary_password_validity_days = 7
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "cognito"
+  environment = "main"
+}

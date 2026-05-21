@@ -1,0 +1,33 @@
+# cloudfront-foundation — main environment example
+#
+# Copy this file to main.tfvars and fill in the values marked <...>.
+# This file is committed; main.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=main.tfvars
+
+aws_region  = "eu-west-3"
+environment = "main"
+
+# ── Remote state ────────────────────────────────────────────────────────────────
+# State keys point to the main environment state files.
+
+terraform_state_bucket          = "inca-terraform-state-<YOUR_AWS_ACCOUNT_ID>"
+upload_foundation_state_key     = "platform/upload-foundation/main/terraform.tfstate"
+deployment_foundation_state_key = "platform/deployment-foundation/main/terraform.tfstate"
+
+# ── CloudFront WAF ──────────────────────────────────────────────────────────────
+
+allowed_country_codes = ["FR"]
+rate_limit_per_ip     = 100
+
+ip_allowlist = ["<CI_RUNNER_IP>/32"]
+
+cloudwatch_log_retention_days = 90
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "cloudfront-foundation"
+  environment = "main"
+}

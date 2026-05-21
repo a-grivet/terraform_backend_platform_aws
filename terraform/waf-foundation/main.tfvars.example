@@ -1,0 +1,34 @@
+# waf-foundation — main environment example
+#
+# Copy this file to main.tfvars and fill in the values marked <...>.
+# This file is committed; main.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=main.tfvars
+
+aws_region  = "eu-west-3"
+environment = "main"
+
+# ── Geo-blocking ────────────────────────────────────────────────────────────────
+
+allowed_country_codes = ["FR"]
+
+# ── Rate limiting ───────────────────────────────────────────────────────────────
+
+rate_limit_per_ip = 100
+
+# ── IP allowlist ────────────────────────────────────────────────────────────────
+# Find the runner IP in the CI job log: "Running on runner-... via <IP>".
+
+ip_allowlist = ["<CI_RUNNER_IP>/32"]
+
+# ── Logging ─────────────────────────────────────────────────────────────────────
+
+cloudwatch_log_retention_days = 90
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "waf-foundation"
+  environment = "main"
+}

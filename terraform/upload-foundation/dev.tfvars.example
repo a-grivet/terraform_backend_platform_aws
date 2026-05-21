@@ -1,0 +1,87 @@
+# upload-foundation — dev environment example
+#
+# Copy this file to dev.tfvars and fill in the values marked <...>.
+# This file is committed; dev.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=dev.tfvars
+#
+# The stack provisions:
+#   - S3 bucket for uploaded blueprint ZIPs
+#   - DynamoDB table tracking upload intents (statuses: WAITING_FOR_UPLOAD, UPLOADED, ...)
+#   - Two Lambda functions: prepare-upload (presigned URL) and complete-upload (status update)
+#   - API Gateway HTTP API exposing POST /templates/uploads/prepare and /complete
+
+aws_region           = "eu-west-3"
+upload_bucket_region = "eu-west-3"
+environment          = "dev"
+
+# ── Resource naming ─────────────────────────────────────────────────────────────
+# Override Terraform-generated names only when you need stable names for
+# cross-stack references or legacy compatibility.
+
+dynamodb_table_name           = "inca-upload-intents-dev"
+lambda_role_name              = "prepare-template-upload-lambda-role-dev"
+lambda_policy_name            = "prepare-template-upload-lambda-policy-dev"
+lambda_function_name          = "prepare-template-upload-dev"
+complete_lambda_role_name     = "complete-template-upload-lambda-role-dev"
+complete_lambda_policy_name   = "complete-template-upload-lambda-policy-dev"
+complete_lambda_function_name = "complete-template-upload-dev"
+http_api_name                 = "inca-upload-api-dev"
+
+# ── Lambda runtime ──────────────────────────────────────────────────────────────
+
+lambda_runtime         = "python3.12"
+lambda_handler         = "handler.lambda_handler"
+lambda_timeout_seconds = 10
+lambda_memory_size_mb  = 256
+
+# ── API Gateway ─────────────────────────────────────────────────────────────────
+# Use a named stage (not "$default") so the path prefix appears in the URL
+# and CloudFront can route /api/* to this API via a path-based cache behavior.
+
+http_api_stage_name             = "api"
+http_api_throttling_burst_limit = 50
+http_api_throttling_rate_limit  = 100
+
+# Optional: custom domain + CORS (uncomment when DNS and ACM are ready).
+# http_api_custom_domain_name = "api.<YOUR_SUBDOMAIN>.example.com"
+# hosted_zone_id              = "<ROUTE53_HOSTED_ZONE_ID>"           # e.g. Z1234567890ABC
+# api_allowed_cors_origins    = ["https://<YOUR_FRONTEND_DOMAIN>"]
+# api_allowed_cors_methods    = ["POST"]
+# api_allowed_cors_headers    = ["Content-Type", "Authorization"]
+# api_allow_credentials       = false
+# api_cors_max_age_seconds    = 300
+
+# ── Upload constraints ──────────────────────────────────────────────────────────
+# presigned_url_expiration_seconds: how long the S3 PUT URL stays valid (max 3600).
+# max_upload_size_bytes: 20 MiB default — enforced by the prepare Lambda.
+
+presigned_url_expiration_seconds = 900
+max_upload_size_bytes            = 20971520
+
+# ── S3 CORS (direct browser uploads) ───────────────────────────────────────────
+# Origins allowed to PUT directly to S3 via the presigned URL.
+# Must include every frontend domain that triggers file uploads.
+
+allowed_cors_origins = ["https://<YOUR_FRONTEND_DOMAIN>"]
+
+# ── Encryption / versioning ─────────────────────────────────────────────────────
+# enable_versioning: keep previous blueprint versions in S3.
+# encrypt_with_kms: use a Customer Managed Key instead of SSE-S3.
+
+enable_versioning = false
+encrypt_with_kms  = false
+# kms_key_arn     = "arn:aws:kms:eu-west-3:<YOUR_AWS_ACCOUNT_ID>:key/<KEY_ID>"
+
+# ── Alerting ────────────────────────────────────────────────────────────────────
+# Email subscribed to the SNS topic for upload errors. Leave as null to disable.
+
+alert_email = "<YOUR_EMAIL>"
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "upload-foundation"
+  environment = "dev"
+}

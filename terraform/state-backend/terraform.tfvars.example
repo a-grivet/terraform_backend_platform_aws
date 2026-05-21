@@ -1,0 +1,9 @@
+aws_region          = "eu-west-3"
+backend_bucket_name = "inca-terraform-state-<YOUR_AWS_ACCOUNT_ID>"
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "state-backend"
+  environment = "shared"
+}

@@ -1,0 +1,703 @@
+# API Security Pipeline
+#
+# Manages the API protection layer: Cognito (authentication), WAF (web application
+# firewall), and CloudFront (CDN and edge WAF). These stacks front and protect the
+# upload and deployment APIs.
+#
+# Stages and shared variables are defined in ci/inca-pipeline.yml, which is included
+# alongside this file by the parent pipeline trigger.
+
+# ===========================================================================
+# Cognito
+# ===========================================================================
+
+.rules_cognito:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "cognito"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan"'
+    - changes:
+        - terraform/cognito/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+.rules_cognito_dev:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "cognito"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      changes:
+        - terraform/cognito/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+.rules_cognito_main:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "cognito"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master")'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - terraform/cognito/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+validate_cognito_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_cognito, rules]
+  script:
+    - terraform -chdir=terraform/cognito init -backend=false
+    - terraform -chdir=terraform/cognito validate
+
+plan_cognito_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_cognito_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_COGNITO_DEV}"
+    TF_VAR_environment: "dev"
+  rules: !reference [.rules_cognito_dev, rules]
+  script:
+    - terraform -chdir=terraform/cognito init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/cognito plan -var-file=dev.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/cognito show -no-color tfplan > terraform/cognito/tfplan.txt
+    - terraform -chdir=terraform/cognito show -json tfplan > terraform/cognito/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/cognito/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/cognito/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/cognito/plan-metadata.txt
+      Cognito dev plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "cognito-dev-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/cognito/tfplan.json
+    paths:
+      - terraform/cognito/tfplan
+      - terraform/cognito/tfplan.txt
+      - terraform/cognito/tfplan.json
+      - terraform/cognito/plan-metadata.env
+      - terraform/cognito/plan-metadata.txt
+
+apply_cognito_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-cognito-dev
+  environment:
+    name: dev/cognito
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_COGNITO_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "cognito")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_cognito_dev" "terraform/cognito/plan-metadata.env" "terraform/cognito/tfplan"
+    - terraform -chdir=terraform/cognito init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/cognito apply -input=false tfplan
+    - echo "USER_POOL_ID=$(terraform -chdir=terraform/cognito output -raw user_pool_id)" > terraform/cognito/deploy_outputs.env
+    - echo "USER_POOL_CLIENT_ID=$(terraform -chdir=terraform/cognito output -raw user_pool_client_id)" >> terraform/cognito/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/cognito/deploy_outputs.env
+    expire_in: 1 day
+
+plan_cognito_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_cognito_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_COGNITO_MAIN}"
+    TF_VAR_environment: "main"
+  rules: !reference [.rules_cognito_main, rules]
+  script:
+    - terraform -chdir=terraform/cognito init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/cognito plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/cognito show -no-color tfplan > terraform/cognito/tfplan.txt
+    - terraform -chdir=terraform/cognito show -json tfplan > terraform/cognito/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/cognito/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/cognito/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/cognito/plan-metadata.txt
+      Cognito main plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "cognito-main-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/cognito/tfplan.json
+    paths:
+      - terraform/cognito/tfplan
+      - terraform/cognito/tfplan.txt
+      - terraform/cognito/tfplan.json
+      - terraform/cognito/plan-metadata.env
+      - terraform/cognito/plan-metadata.txt
+
+apply_cognito_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs:
+    # WAF must be applied first so its web_acl_arn remote state is available
+    # when cognito re-plans. optional: true allows TARGET_STACK=cognito runs
+    # where WAF is already applied from a previous pipeline.
+    - job: apply_waf_main
+      optional: true
+      artifacts: false
+  allow_failure: false
+  resource_group: terraform-cognito-main
+  environment:
+    name: main/cognito
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_COGNITO_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "cognito")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    # Verify the saved plan matches the current commit before re-planning.
+    - download_and_validate_plan_artifact "plan_cognito_main" "terraform/cognito/plan-metadata.env" "terraform/cognito/tfplan"
+    - terraform -chdir=terraform/cognito init -backend-config=backend-main.hcl
+    # Re-plan with fresh state so WAF remote state output (web_acl_arn) is captured.
+    # The saved plan is used only for commit-SHA verification above.
+    - terraform -chdir=terraform/cognito plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/cognito apply -input=false tfplan
+    - echo "USER_POOL_ID=$(terraform -chdir=terraform/cognito output -raw user_pool_id)" > terraform/cognito/deploy_outputs.env
+    - echo "USER_POOL_CLIENT_ID=$(terraform -chdir=terraform/cognito output -raw user_pool_client_id)" >> terraform/cognito/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/cognito/deploy_outputs.env
+    expire_in: 1 day
+
+destroy_cognito_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs:
+    - job: destroy_deployment_dev
+      optional: true
+  allow_failure: false
+  resource_group: terraform-cognito-dev
+  environment:
+    name: dev/cognito
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_COGNITO_DEV}"
+    TF_VAR_environment: "dev"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "cognito"'
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-DEV" || (echo "Set CONFIRMATION=DESTROY-DEV to confirm Cognito dev destruction" && exit 1)
+    - terraform -chdir=terraform/cognito init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/cognito destroy -var-file=dev.tfvars -input=false -auto-approve
+
+# ===========================================================================
+# WAF foundation
+# ===========================================================================
+
+.rules_waf:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "waf"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan"'
+    - changes:
+        - terraform/waf-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+.rules_waf_dev:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "waf"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      changes:
+        - terraform/waf-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+.rules_waf_main:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "waf"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master")'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - terraform/waf-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+validate_waf_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_waf, rules]
+  script:
+    - terraform -chdir=terraform/waf-foundation init -backend=false
+    - terraform -chdir=terraform/waf-foundation validate
+
+plan_waf_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_waf_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_WAF_DEV}"
+  rules: !reference [.rules_waf_dev, rules]
+  script:
+    - terraform -chdir=terraform/waf-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/waf-foundation plan -var-file=dev.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/waf-foundation show -no-color tfplan > terraform/waf-foundation/tfplan.txt
+    - terraform -chdir=terraform/waf-foundation show -json tfplan > terraform/waf-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/waf-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/waf-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/waf-foundation/plan-metadata.txt
+      WAF foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "waf-foundation-dev-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/waf-foundation/tfplan.json
+    paths:
+      - terraform/waf-foundation/tfplan
+      - terraform/waf-foundation/tfplan.txt
+      - terraform/waf-foundation/tfplan.json
+      - terraform/waf-foundation/plan-metadata.env
+      - terraform/waf-foundation/plan-metadata.txt
+
+apply_waf_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-waf-dev
+  environment:
+    name: dev/waf
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_WAF_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "waf")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_waf_dev" "terraform/waf-foundation/plan-metadata.env" "terraform/waf-foundation/tfplan"
+    - terraform -chdir=terraform/waf-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/waf-foundation apply -input=false tfplan
+    - echo "WAF_WEB_ACL_ARN=$(terraform -chdir=terraform/waf-foundation output -raw web_acl_arn)" > terraform/waf-foundation/deploy_outputs.env
+    - echo "WAF_LOG_GROUP_NAME=$(terraform -chdir=terraform/waf-foundation output -raw waf_log_group_name)" >> terraform/waf-foundation/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/waf-foundation/deploy_outputs.env
+    expire_in: 1 day
+
+plan_waf_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_waf_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_WAF_MAIN}"
+  rules: !reference [.rules_waf_main, rules]
+  script:
+    - terraform -chdir=terraform/waf-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/waf-foundation plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/waf-foundation show -no-color tfplan > terraform/waf-foundation/tfplan.txt
+    - terraform -chdir=terraform/waf-foundation show -json tfplan > terraform/waf-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/waf-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/waf-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/waf-foundation/plan-metadata.txt
+      WAF foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "waf-foundation-main-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/waf-foundation/tfplan.json
+    paths:
+      - terraform/waf-foundation/tfplan
+      - terraform/waf-foundation/tfplan.txt
+      - terraform/waf-foundation/tfplan.json
+      - terraform/waf-foundation/plan-metadata.env
+      - terraform/waf-foundation/plan-metadata.txt
+
+apply_waf_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-waf-main
+  environment:
+    name: main/waf
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_WAF_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "waf")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_waf_main" "terraform/waf-foundation/plan-metadata.env" "terraform/waf-foundation/tfplan"
+    - terraform -chdir=terraform/waf-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/waf-foundation apply -input=false tfplan
+    - echo "WAF_WEB_ACL_ARN=$(terraform -chdir=terraform/waf-foundation output -raw web_acl_arn)" > terraform/waf-foundation/deploy_outputs.env
+    - echo "WAF_LOG_GROUP_NAME=$(terraform -chdir=terraform/waf-foundation output -raw waf_log_group_name)" >> terraform/waf-foundation/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/waf-foundation/deploy_outputs.env
+    expire_in: 1 day
+
+destroy_waf_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs:
+    - job: destroy_cognito_dev
+      optional: true
+  allow_failure: false
+  resource_group: terraform-waf-dev
+  environment:
+    name: dev/waf
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_WAF_DEV}"
+    TF_VAR_environment: "dev"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "waf"'
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-DEV" || (echo "Set CONFIRMATION=DESTROY-DEV to confirm WAF dev destruction" && exit 1)
+    - terraform -chdir=terraform/waf-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/waf-foundation destroy -var-file=dev.tfvars -input=false -auto-approve
+
+# ===========================================================================
+# CloudFront foundation
+# ===========================================================================
+
+.rules_cloudfront:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "cloudfront"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan"'
+    - changes:
+        - terraform/cloudfront-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+.rules_cloudfront_dev:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "cloudfront"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $CI_COMMIT_BRANCH == "dev"'
+    - if: '$CI_COMMIT_BRANCH == "dev"'
+      changes:
+        - terraform/cloudfront-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+.rules_cloudfront_main:
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" || $PIPELINE_ACTION == "apply"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && $TARGET_STACK != "all" && $TARGET_STACK != "cloudfront"'
+      when: never
+    - if: '$PIPELINE_ACTION == "plan" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master")'
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - terraform/cloudfront-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/api-security.yml
+
+validate_cloudfront_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_cloudfront, rules]
+  script:
+    - terraform -chdir=terraform/cloudfront-foundation init -backend=false
+    - terraform -chdir=terraform/cloudfront-foundation validate
+
+plan_cloudfront_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_cloudfront_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_CLOUDFRONT_DEV}"
+  rules: !reference [.rules_cloudfront_dev, rules]
+  script:
+    - terraform -chdir=terraform/cloudfront-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/cloudfront-foundation plan -var-file=dev.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/cloudfront-foundation show -no-color tfplan > terraform/cloudfront-foundation/tfplan.txt
+    - terraform -chdir=terraform/cloudfront-foundation show -json tfplan > terraform/cloudfront-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/cloudfront-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/cloudfront-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/cloudfront-foundation/plan-metadata.txt
+      CloudFront foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "cloudfront-foundation-dev-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/cloudfront-foundation/tfplan.json
+    paths:
+      - terraform/cloudfront-foundation/tfplan
+      - terraform/cloudfront-foundation/tfplan.txt
+      - terraform/cloudfront-foundation/tfplan.json
+      - terraform/cloudfront-foundation/plan-metadata.env
+      - terraform/cloudfront-foundation/plan-metadata.txt
+
+apply_cloudfront_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs: []
+  allow_failure: false
+  resource_group: terraform-cloudfront-dev
+  environment:
+    name: dev/cloudfront
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_CLOUDFRONT_DEV}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && $CI_COMMIT_BRANCH == "dev" && ($TARGET_STACK == "all" || $TARGET_STACK == "cloudfront")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    - download_and_validate_plan_artifact "plan_cloudfront_dev" "terraform/cloudfront-foundation/plan-metadata.env" "terraform/cloudfront-foundation/tfplan"
+    - terraform -chdir=terraform/cloudfront-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/cloudfront-foundation apply -input=false tfplan
+    - echo "UPLOAD_CLOUDFRONT_DOMAIN=$(terraform -chdir=terraform/cloudfront-foundation output -raw upload_cloudfront_domain)" > terraform/cloudfront-foundation/deploy_outputs.env
+    - echo "DEPLOYMENT_CLOUDFRONT_DOMAIN=$(terraform -chdir=terraform/cloudfront-foundation output -raw deployment_cloudfront_domain)" >> terraform/cloudfront-foundation/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/cloudfront-foundation/deploy_outputs.env
+    expire_in: 1 day
+
+plan_cloudfront_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - job: check_terraform_format
+      optional: true
+    - job: validate_cloudfront_terraform
+      optional: true
+    - job: lint_terraform
+      optional: true
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_CLOUDFRONT_MAIN}"
+  rules: !reference [.rules_cloudfront_main, rules]
+  script:
+    - terraform -chdir=terraform/cloudfront-foundation init -backend-config=backend-main.hcl
+    - terraform -chdir=terraform/cloudfront-foundation plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/cloudfront-foundation show -no-color tfplan > terraform/cloudfront-foundation/tfplan.txt
+    - terraform -chdir=terraform/cloudfront-foundation show -json tfplan > terraform/cloudfront-foundation/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/cloudfront-foundation/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/cloudfront-foundation/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/cloudfront-foundation/plan-metadata.txt
+      CloudFront foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "cloudfront-foundation-main-plan-${CI_PIPELINE_ID}"
+    expire_in: 1 hour
+    reports:
+      terraform: terraform/cloudfront-foundation/tfplan.json
+    paths:
+      - terraform/cloudfront-foundation/tfplan
+      - terraform/cloudfront-foundation/tfplan.txt
+      - terraform/cloudfront-foundation/tfplan.json
+      - terraform/cloudfront-foundation/plan-metadata.env
+      - terraform/cloudfront-foundation/plan-metadata.txt
+
+apply_cloudfront_main:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs:
+    # Upload and deployment must be applied first so their API IDs are available
+    # in remote state when cloudfront re-plans. optional: true allows
+    # TARGET_STACK=cloudfront runs where these stacks are already applied.
+    - job: apply_upload_main
+      optional: true
+      artifacts: false
+    - job: apply_deployment_main
+      optional: true
+      artifacts: false
+  allow_failure: false
+  resource_group: terraform-cloudfront-main
+  environment:
+    name: main/cloudfront
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_CLOUDFRONT_MAIN}"
+  rules:
+    - if: '$PIPELINE_ACTION == "apply" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master") && ($TARGET_STACK == "all" || $TARGET_STACK == "cloudfront")'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "APPLY" || (echo "Set CONFIRMATION=APPLY pipeline variable to confirm" && exit 1)
+    - . scripts/ci/ci_terraform.sh
+    # Verify the saved plan matches the current commit before re-planning.
+    - download_and_validate_plan_artifact "plan_cloudfront_main" "terraform/cloudfront-foundation/plan-metadata.env" "terraform/cloudfront-foundation/tfplan"
+    - terraform -chdir=terraform/cloudfront-foundation init -backend-config=backend-main.hcl
+    # Re-plan with fresh state so upload and deployment API IDs are captured.
+    # The saved plan is used only for commit-SHA verification above.
+    - terraform -chdir=terraform/cloudfront-foundation plan -var-file=main.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/cloudfront-foundation apply -input=false tfplan
+    - echo "UPLOAD_CLOUDFRONT_DOMAIN=$(terraform -chdir=terraform/cloudfront-foundation output -raw upload_cloudfront_domain)" > terraform/cloudfront-foundation/deploy_outputs.env
+    - echo "DEPLOYMENT_CLOUDFRONT_DOMAIN=$(terraform -chdir=terraform/cloudfront-foundation output -raw deployment_cloudfront_domain)" >> terraform/cloudfront-foundation/deploy_outputs.env
+  artifacts:
+    reports:
+      dotenv: terraform/cloudfront-foundation/deploy_outputs.env
+    expire_in: 1 day
+
+destroy_cloudfront_dev:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: destroy
+  needs: []
+  allow_failure: false
+  resource_group: terraform-cloudfront-dev
+  environment:
+    name: dev/cloudfront
+    action: stop
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_CLOUDFRONT_DEV}"
+    TF_VAR_environment: "dev"
+  rules:
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "cloudfront"'
+    - if: '$PIPELINE_ACTION == "destroy" && $CI_COMMIT_BRANCH == "dev" && $TARGET_STACK == "all"'
+    - when: never
+  script:
+    - test "${CONFIRMATION:-}" = "DESTROY-DEV" || (echo "Set CONFIRMATION=DESTROY-DEV to confirm CloudFront dev destruction" && exit 1)
+    - terraform -chdir=terraform/cloudfront-foundation init -backend-config=backend-dev.hcl
+    - terraform -chdir=terraform/cloudfront-foundation destroy -var-file=dev.tfvars -input=false -auto-approve

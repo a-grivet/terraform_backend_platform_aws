@@ -1,0 +1,26 @@
+# learner-sandbox-roles — main environment example
+#
+# Copy this file to main.tfvars and fill in the values marked <...>.
+# This file is committed; main.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=main.tfvars
+#
+# Note: the ECS task role name uses "main" suffix instead of "dev".
+
+aws_region  = "eu-west-3"
+environment = "main"
+
+sandbox_role_count = 3
+
+deployer_role_arns = [
+  "arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/inca-auto-deployer-gitlab-learner-sandbox",
+  "arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/inca-deployment-task-role-main",
+]
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "learner-sandbox-roles"
+  environment = "main"
+}

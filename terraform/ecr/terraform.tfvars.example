@@ -1,0 +1,24 @@
+aws_region      = "eu-west-1"
+repository_name = "inca-terraform-runner"
+
+image_tag_mutability = "IMMUTABLE_WITH_EXCLUSION"
+image_tag_mutability_exclusion_filters = [
+  {
+    filter_type = "WILDCARD"
+    filter      = "dev"
+  },
+  {
+    filter_type = "WILDCARD"
+    filter      = "main"
+  },
+  {
+    filter_type = "WILDCARD"
+    filter      = "latest"
+  },
+]
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  environment = "pro"
+}

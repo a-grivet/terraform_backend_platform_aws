@@ -1,0 +1,273 @@
+# Bootstrap Pipeline
+#
+# Manages the AWS resources that allow GitLab CI/CD to operate: GitLab OIDC IAM
+# roles, the runner image ECR repository, and Terraform state backend checks.
+#
+# This is a sensitive, low-frequency pipeline. It is intentionally separate
+# from regular application infrastructure delivery.
+# Destroy is intentionally absent — bootstrap resources must be decommissioned
+# manually to prevent accidental loss of CI/CD access.
+
+include:
+  - local: ci/_templates.yml
+
+stages:
+  - validate
+  - plan
+  - apply
+
+variables:
+  AWS_REGION: "eu-west-3"
+  AWS_ROLE_ARN_GITLAB_OIDC_ADMIN: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-oidc-admin"
+
+# Paths that trigger all bootstrap jobs.
+.rules_bootstrap:
+  rules:
+    - changes:
+        - terraform/ecr/**/*
+        - terraform/gitlab-oidc-roles/**/*
+        - terraform/state-backend/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/bootstrap.yml
+
+# ---------------------------------------------------------------------------
+# Validate stage
+# ---------------------------------------------------------------------------
+
+check_terraform_format_bootstrap:
+  extends: .terraform_base
+  stage: validate
+  rules: !reference [.rules_bootstrap, rules]
+  script:
+    - terraform fmt -check -recursive terraform
+
+lint_terraform_bootstrap:
+  stage: validate
+  image:
+    name: ghcr.io/terraform-linters/tflint:v0.56.0
+    entrypoint: [""]
+  services: []
+  variables:
+    TFLINT_PLUGIN_DIR: "${CI_PROJECT_DIR}/.tflint.d"
+  cache:
+    key: "tflint-aws-v0.40.0"
+    paths:
+      - .tflint.d/
+    policy: pull-push
+  rules: !reference [.rules_bootstrap, rules]
+  script:
+    - tflint --config "${CI_PROJECT_DIR}/ci/quality/.tflint.hcl" --init
+    - |
+      for dir in terraform/*; do
+        if [ -d "$dir" ] && [ -f "$dir/main.tf" ]; then
+          echo "Running tflint in $dir"
+          tflint --config "${CI_PROJECT_DIR}/ci/quality/.tflint.hcl" --chdir="$dir"
+        fi
+      done
+
+# allow_failure while the baseline is established — harden to false once all
+# findings are reviewed and intentional patterns are skipped via .checkov.yaml.
+scan_terraform_bootstrap:
+  stage: validate
+  image:
+    name: bridgecrew/checkov:3
+    entrypoint: [""]
+  services: []
+  allow_failure: true
+  rules: !reference [.rules_bootstrap, rules]
+  script:
+    - checkov --config-file ci/quality/.checkov.yaml --quiet --compact
+
+validate_gitlab_oidc_roles_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules:
+    - changes:
+        - terraform/gitlab-oidc-roles/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/bootstrap.yml
+  script:
+    - terraform -chdir=terraform/gitlab-oidc-roles init -backend=false
+    - terraform -chdir=terraform/gitlab-oidc-roles validate
+
+validate_runner_ecr_repository_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules:
+    - changes:
+        - terraform/ecr/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/bootstrap.yml
+  script:
+    - terraform -chdir=terraform/ecr init -backend=false
+    - terraform -chdir=terraform/ecr validate
+
+validate_terraform_state_backend_terraform:
+  extends: .terraform_base
+  stage: validate
+  rules:
+    - changes:
+        - terraform/state-backend/**/*
+        - ci/bootstrap.yml
+  script:
+    - terraform -chdir=terraform/state-backend init -backend=false
+    - terraform -chdir=terraform/state-backend validate
+
+# ---------------------------------------------------------------------------
+# Plan stage
+# ---------------------------------------------------------------------------
+
+plan_gitlab_oidc_roles:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - validate_gitlab_oidc_roles_terraform
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_GITLAB_OIDC_ADMIN}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - terraform/gitlab-oidc-roles/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/bootstrap.yml
+  script:
+    - terraform -chdir=terraform/gitlab-oidc-roles init -backend-config=backend.hcl
+    - terraform -chdir=terraform/gitlab-oidc-roles plan -var-file=shared.tfvars -input=false -out=tfplan
+    - terraform -chdir=terraform/gitlab-oidc-roles show -no-color tfplan > terraform/gitlab-oidc-roles/tfplan.txt
+    - terraform -chdir=terraform/gitlab-oidc-roles show -json tfplan > terraform/gitlab-oidc-roles/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/gitlab-oidc-roles/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/gitlab-oidc-roles/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/gitlab-oidc-roles/plan-metadata.txt
+      GitLab OIDC roles plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "gitlab-oidc-roles-plan-${CI_PIPELINE_ID}"
+    expire_in: 7 days
+    reports:
+      terraform: terraform/gitlab-oidc-roles/tfplan.json
+    paths:
+      - terraform/gitlab-oidc-roles/tfplan
+      - terraform/gitlab-oidc-roles/tfplan.txt
+      - terraform/gitlab-oidc-roles/tfplan.json
+      - terraform/gitlab-oidc-roles/plan-metadata.env
+      - terraform/gitlab-oidc-roles/plan-metadata.txt
+
+plan_runner_ecr_repository:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: plan
+  needs:
+    - validate_runner_ecr_repository_terraform
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_GITLAB_OIDC_ADMIN}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - terraform/ecr/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/bootstrap.yml
+  script:
+    - terraform -chdir=terraform/ecr init -backend-config=backend.hcl
+    - terraform -chdir=terraform/ecr plan -input=false -out=tfplan
+    - terraform -chdir=terraform/ecr show -no-color tfplan > terraform/ecr/tfplan.txt
+    - terraform -chdir=terraform/ecr show -json tfplan > terraform/ecr/tfplan.json
+    - echo "PLAN_PIPELINE_ID=${CI_PIPELINE_ID}" | tee terraform/ecr/plan-metadata.env
+    - echo "PLAN_COMMIT_SHA=${CI_COMMIT_SHA}" | tee -a terraform/ecr/plan-metadata.env
+    - |
+      cat <<EOF | tee terraform/ecr/plan-metadata.txt
+      ECR foundation plan created successfully.
+      Pipeline ID recorded in artifact: ${CI_PIPELINE_ID}
+      Commit SHA recorded in artifact: ${CI_COMMIT_SHA}
+      Manual apply guardrails:
+      - the apply job must be started manually
+      - the Terraform plan artifact must exist
+      - the recorded pipeline ID must match the current pipeline
+      - the recorded commit SHA must match the current commit
+      EOF
+  artifacts:
+    name: "ecr-foundation-plan-${CI_PIPELINE_ID}"
+    expire_in: 7 days
+    reports:
+      terraform: terraform/ecr/tfplan.json
+    paths:
+      - terraform/ecr/tfplan
+      - terraform/ecr/tfplan.txt
+      - terraform/ecr/tfplan.json
+      - terraform/ecr/plan-metadata.env
+      - terraform/ecr/plan-metadata.txt
+
+# ---------------------------------------------------------------------------
+# Apply stage
+# ---------------------------------------------------------------------------
+
+apply_gitlab_oidc_roles:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs:
+    - job: plan_gitlab_oidc_roles
+      artifacts: true
+  when: manual
+  allow_failure: false
+  resource_group: terraform-foundation
+  environment:
+    name: foundation
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_GITLAB_OIDC_ADMIN}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - terraform/gitlab-oidc-roles/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/bootstrap.yml
+  script:
+    - . scripts/ci/ci_terraform.sh
+    - terraform -chdir=terraform/gitlab-oidc-roles init -backend-config=backend.hcl
+    - validate_plan_artifacts terraform/gitlab-oidc-roles/plan-metadata.env terraform/gitlab-oidc-roles/tfplan
+    - terraform -chdir=terraform/gitlab-oidc-roles apply -var-file=shared.tfvars -input=false tfplan
+
+apply_runner_ecr_repository:
+  extends:
+    - .terraform_oidc_base
+    - .oidc_assume_role
+  stage: apply
+  needs:
+    - job: plan_runner_ecr_repository
+      artifacts: true
+  when: manual
+  allow_failure: false
+  resource_group: terraform-foundation
+  environment:
+    name: foundation
+  variables:
+    TF_ROLE_ARN: "${AWS_ROLE_ARN_GITLAB_OIDC_ADMIN}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - terraform/ecr/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/bootstrap.yml
+  script:
+    - . scripts/ci/ci_terraform.sh
+    - terraform -chdir=terraform/ecr init -backend-config=backend.hcl
+    - validate_plan_artifacts terraform/ecr/plan-metadata.env terraform/ecr/tfplan
+    - terraform -chdir=terraform/ecr apply -input=false tfplan

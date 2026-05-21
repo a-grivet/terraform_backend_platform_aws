@@ -1,0 +1,35 @@
+# Shared CI Templates
+#
+# Common GitLab CI templates for Terraform execution and AWS OIDC setup.
+# These hidden jobs are extended by child pipelines and should not contain
+# project-specific delivery logic.
+
+.terraform_base:
+  image:
+    name: hashicorp/terraform:1.14.7
+    entrypoint: [""]
+  services: []
+
+.terraform_oidc_base:
+  extends: .terraform_base
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.revolve.team
+
+# Assumes an AWS IAM role via OIDC web identity.
+# Requires TF_ROLE_ARN to be set on the job and GITLAB_OIDC_TOKEN via id_tokens
+# (provided by .terraform_oidc_base).
+.oidc_assume_role:
+  before_script:
+    - apk add --no-cache aws-cli
+    - aws --version
+    - >
+      export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s"
+      $(aws sts assume-role-with-web-identity
+      --role-arn "${TF_ROLE_ARN}"
+      --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token "${GITLAB_OIDC_TOKEN}"
+      --duration-seconds 3600
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
+      --output text))
+    - aws sts get-caller-identity

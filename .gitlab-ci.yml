@@ -1,0 +1,128 @@
+# Parent GitLab CI/CD Pipeline
+#
+# Pure orchestrator: delegates all work to domain-specific child pipelines.
+# No jobs are defined here — only pipeline triggers.
+#
+# Child pipelines:
+#   ci/runner.yml          — Terraform runner image build and publish
+#   ci/inca-pipeline.yml   — INCA delivery workflow (upload, validation, deployment, learner-sandbox)
+#   ci/api-security.yml    — API protection layer (Cognito, WAF, CloudFront)
+#   ci/bootstrap.yml       — AWS bootstrap foundation (OIDC roles, ECR, state backend)
+
+spec:
+  inputs:
+    pipeline-action:
+      description: "Manual operator action to expose. Use auto for normal push/MR behavior."
+      default: "auto"
+      options:
+        - "auto"
+        - "plan"
+        - "apply"
+        - "destroy"
+    target-stack:
+      description: "Target stack for manual operator actions. Environment is determined by branch (dev → dev, main → prod)."
+      default: "all"
+      options:
+        - "all"
+        - "upload"
+        - "validation"
+        - "deployment"
+        - "cognito"
+        - "waf"
+        - "cloudfront"
+        - "learner-sandbox"
+    confirmation:
+      description: "Confirmation token: APPLY for apply, DESTROY-DEV for destroy on dev, DESTROY-PROD for destroy on prod."
+      default: ""
+---
+
+variables:
+  PARENT_PIPELINE_SOURCE: "$CI_PIPELINE_SOURCE"
+  PIPELINE_ACTION: "$[[ inputs.pipeline-action ]]"
+  TARGET_STACK: "$[[ inputs.target-stack ]]"
+  CONFIRMATION: "$[[ inputs.confirmation ]]"
+
+stages:
+  - runner
+  - orchestrate
+
+# Triggered only on auto (push/MR) to avoid rebuilding the image on manual
+# plan/apply/destroy runs.
+trigger_runner_pipeline:
+  stage: runner
+  rules:
+    - if: '$PIPELINE_ACTION != "auto"'
+      when: never
+    - changes:
+        - Dockerfile
+        - config/**/*
+        - scripts/runner/**/*
+        - tests/fixtures/blueprints/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/runner.yml
+  trigger:
+    include:
+      - local: ci/runner.yml
+    strategy: depend
+    forward:
+      yaml_variables: true
+      pipeline_variables: true
+
+# Always triggered on web pipelines and on any relevant file change.
+# PIPELINE_ACTION is forwarded into the child pipeline where each job has its
+# own guard (apply jobs skip on plan/auto, etc.).
+# Both files are included in a single trigger so all jobs share the same child
+# pipeline DAG, enabling cross-domain needs: (e.g. smoke_test_deployment_dev
+# depending on apply_upload_dev).
+trigger_application_pipeline:
+  stage: orchestrate
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - changes:
+        - Dockerfile
+        - config/**/*
+        - lambdas/**/*
+        - scripts/**/*
+        - tests/**/*
+        - terraform/upload-foundation/**/*
+        - terraform/validation-foundation/**/*
+        - terraform/learner-sandbox-roles/**/*
+        - terraform/cognito/**/*
+        - terraform/deployment-foundation/**/*
+        - terraform/waf-foundation/**/*
+        - terraform/cloudfront-foundation/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/inca-pipeline.yml
+        - ci/api-security.yml
+  trigger:
+    include:
+      - local: ci/inca-pipeline.yml
+      - local: ci/api-security.yml
+    strategy: depend
+    forward:
+      yaml_variables: true
+      pipeline_variables: true
+
+# Triggered only on auto to keep bootstrap administration separate from
+# routine application delivery.
+trigger_bootstrap_pipeline:
+  stage: orchestrate
+  rules:
+    - if: '$PIPELINE_ACTION != "auto"'
+      when: never
+    - changes:
+        - terraform/ecr/**/*
+        - terraform/gitlab-oidc-roles/**/*
+        - terraform/state-backend/**/*
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/bootstrap.yml
+  trigger:
+    include:
+      - local: ci/bootstrap.yml
+    strategy: depend
+    forward:
+      yaml_variables: true
+      pipeline_variables: true

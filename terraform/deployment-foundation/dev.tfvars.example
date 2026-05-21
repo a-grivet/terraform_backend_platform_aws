@@ -1,0 +1,53 @@
+# deployment-foundation — dev environment example
+#
+# Copy this file to dev.tfvars and fill in the values marked <...>.
+# This file is committed; dev.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=dev.tfvars
+#
+# The stack provisions:
+#   - Step Functions state machine orchestrating ECS deployment tasks
+#   - ECS Fargate cluster + task definition running the deployment runner image
+#   - API Gateway HTTP API for triggering deployments
+#   - IAM roles for the trigger Lambda and ECS task
+#   - SNS topic for deployment alert notifications
+#
+# Prerequisites:
+#   - upload-foundation must be applied first (provides S3 bucket + DynamoDB table)
+#   - cognito must be applied first (user pool ID/client ID read from remote state)
+#   - ECR repository must contain the runner image tagged with the current commit SHA
+#
+# The runner image tag is injected by CI via:
+#   TF_VAR_deployment_runner_image_tag="${CI_COMMIT_SHA}"
+# For a manual plan/apply, pass:
+#   terraform plan -var="deployment_runner_image_tag=<40-char-commit-sha>"
+
+aws_region  = "eu-west-3"
+environment = "dev"
+
+# ── Runner image ────────────────────────────────────────────────────────────────
+# ECR repository URI without tag (tag is injected by CI via TF_VAR_deployment_runner_image_tag).
+# Format: <AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/<REPO_NAME>
+
+deployment_runner_image_repository = "<YOUR_AWS_ACCOUNT_ID>.dkr.ecr.eu-west-3.amazonaws.com/inca-terraform-runner"
+
+# ── ECS task sizing ─────────────────────────────────────────────────────────────
+# Fargate pricing is based on vCPU + memory. 1 vCPU = 1024 CPU units.
+# Recommended for Terraform workloads: 1024 CPU / 2048 MiB.
+
+task_cpu    = 1024
+task_memory = 2048
+
+# ── Alerting ────────────────────────────────────────────────────────────────────
+# Email address subscribed to the SNS topic for deployment failures.
+# Leave as null to disable email notifications.
+
+alert_email = "<YOUR_EMAIL>"
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "deployment-foundation"
+  environment = "dev"
+}

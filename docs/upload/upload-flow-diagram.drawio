@@ -1,0 +1,178 @@
+<mxfile host="Electron" agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) draw.io/29.6.6 Chrome/144.0.7559.236 Electron/40.8.4 Safari/537.36" version="29.6.6">
+  <diagram id="upload-flow-detailed" name="Upload Flow">
+    <mxGraphModel dx="2278" dy="1218" grid="0" gridSize="10" guides="0" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;" value="INCA Upload Flow Overview" vertex="1">
+          <mxGeometry height="30" width="520" x="281" y="2" as="geometry" />
+        </mxCell>
+        <mxCell id="client" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" value="Frontend / API client&#xa;&#xa;Calls HTTP API&#xa;Uploads ZIP directly to S3 using presigned PUT URL" vertex="1">
+          <mxGeometry height="140" width="160" x="8" y="72" as="geometry" />
+        </mxCell>
+        <mxCell id="awsAccount" parent="1" style="points=[[0,0],[0.25,0],[0.5,0],[0.75,0],[1,0],[1,0.25],[1,0.5],[1,0.75],[1,1],[0.75,1],[0.5,1],[0.25,1],[0,1],[0,0.75],[0,0.5],[0,0.25]];outlineConnect=0;gradientColor=none;html=1;whiteSpace=wrap;fontSize=12;fontStyle=0;container=1;pointerEvents=0;collapsible=0;recursiveResize=0;shape=mxgraph.aws4.group;grIcon=mxgraph.aws4.group_account;strokeColor=#CD2264;fillColor=none;verticalAlign=top;align=left;spacingLeft=30;fontColor=#CD2264;dashed=0;" value="AWS Account - Upload Foundation" vertex="1">
+          <mxGeometry height="928" width="1468" x="280" y="90" as="geometry" />
+        </mxCell>
+        <mxCell id="routeComplete" parent="awsAccount" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" value="Route&#xa;POST /templates/uploads/complete" vertex="1">
+          <mxGeometry height="50" width="250" x="306" y="315" as="geometry" />
+        </mxCell>
+        <mxCell id="api" parent="awsAccount" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=#ffffff;fillColor=#232F3E;dashed=0;verticalLabelPosition=middle;verticalAlign=bottom;align=center;html=1;whiteSpace=wrap;fontSize=11;fontStyle=1;spacing=3;shape=mxgraph.aws4.productIcon;prIcon=mxgraph.aws4.api_gateway;" value="Amazon API Gateway&lt;br&gt;HTTP API: inca-upload-api" vertex="1">
+          <mxGeometry height="155" width="90" x="123" y="135" as="geometry" />
+        </mxCell>
+        <mxCell id="lambdaPrepare" parent="awsAccount" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=#ffffff;fillColor=#232F3E;dashed=0;verticalLabelPosition=middle;verticalAlign=bottom;align=center;html=1;whiteSpace=wrap;fontSize=11;fontStyle=1;spacing=3;shape=mxgraph.aws4.productIcon;prIcon=mxgraph.aws4.lambda;" value="AWS Lambda&lt;br&gt;prepare-template-upload" vertex="1">
+          <mxGeometry height="140" width="90" x="841" y="183" as="geometry" />
+        </mxCell>
+        <mxCell id="lambdaComplete" parent="awsAccount" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=#ffffff;fillColor=#232F3E;dashed=0;verticalLabelPosition=middle;verticalAlign=bottom;align=center;html=1;whiteSpace=wrap;fontSize=11;fontStyle=1;spacing=3;shape=mxgraph.aws4.productIcon;prIcon=mxgraph.aws4.lambda;" value="AWS Lambda&lt;br&gt;complete-template-upload" vertex="1">
+          <mxGeometry height="142" width="90" x="661" y="469" as="geometry" />
+        </mxCell>
+        <mxCell id="s3" parent="awsAccount" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=#ffffff;fillColor=#232F3E;dashed=0;verticalLabelPosition=middle;verticalAlign=bottom;align=center;html=1;whiteSpace=wrap;fontSize=11;fontStyle=1;spacing=3;shape=mxgraph.aws4.productIcon;prIcon=mxgraph.aws4.s3;" value="Amazon S3&#xa;Raw upload bucket&#xa;inca-terraform-uploads-&lt;env&gt;-&lt;account_id&gt;" vertex="1">
+          <mxGeometry height="170" width="90" x="1295" y="329" as="geometry" />
+        </mxCell>
+        <mxCell id="cw" parent="awsAccount" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=#ffffff;fillColor=#232F3E;dashed=0;verticalLabelPosition=middle;verticalAlign=bottom;align=center;html=1;whiteSpace=wrap;fontSize=11;fontStyle=1;spacing=3;shape=mxgraph.aws4.productIcon;prIcon=mxgraph.aws4.cloudwatch;" value="Amazon CloudWatch Logs&#xa;Separate log groups&#xa;/aws/lambda/prepare-template-upload&#xa;/aws/lambda/complete-template-upload" vertex="1">
+          <mxGeometry height="200" width="90" x="1349" y="704" as="geometry" />
+        </mxCell>
+        <mxCell id="iamInvoke" parent="awsAccount" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;verticalAlign=top;fontSize=11;" value="Lambda invoke permission&#xa;&#xa;aws_lambda_permission&#xa;AllowHttpApiInvokePrepareUpload&#xa;AllowHttpApiInvokeCompleteUpload&#xa;&#xa;Principal: apigateway.amazonaws.com&#xa;Action: lambda:InvokeFunction" vertex="1">
+          <mxGeometry height="122" width="280" x="28" y="384" as="geometry" />
+        </mxCell>
+        <mxCell id="prepareEnv" parent="awsAccount" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;verticalAlign=top;fontSize=11;" value="&lt;div style=&quot;text-align: center;&quot;&gt;&lt;b style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;Prepare Lambda environment variables&lt;/b&gt;&lt;/div&gt;&lt;br&gt;UPLOAD_BUCKET_NAME&lt;br&gt;UPLOAD_BUCKET_REGION&lt;br&gt;UPLOAD_INTENTS_TABLE_NAME&lt;br&gt;MAX_UPLOAD_SIZE_BYTES&lt;br&gt;PRESIGNED_URL_EXPIRATION_SECONDS" vertex="1">
+          <mxGeometry height="140" width="280" x="748" y="636" as="geometry" />
+        </mxCell>
+        <mxCell id="completeEnv" parent="awsAccount" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;align=left;verticalAlign=top;fontSize=11;" value="&lt;div style=&quot;text-align: center;&quot;&gt;&lt;b style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;Complete Lambda environment variables&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;text-align: center;&quot;&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255)); text-align: left;&quot;&gt;&lt;br&gt;&lt;/span&gt;&lt;/div&gt;&lt;div style=&quot;&quot;&gt;&lt;span style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;UPLOAD_BUCKET_NAME&lt;/span&gt;&lt;/div&gt;UPLOAD_INTENTS_TABLE_NAME" vertex="1">
+          <mxGeometry height="90" width="280" x="568" y="807" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="awsAccount" source="routeComplete" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="lambdaComplete">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4label" connectable="0" parent="e4" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="AWS_PROXY integration" vertex="1">
+          <mxGeometry relative="1" x="0.1" y="-1" as="geometry">
+            <mxPoint x="10" y="-8" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="awsAccount" source="api" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="routeComplete">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="awsAccount" source="lambdaPrepare" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#9673a6;strokeWidth=2;" target="ddb">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6label" connectable="0" parent="e6" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="PutItem(Item status = PENDING)" vertex="1">
+          <mxGeometry relative="1" x="-0.1" y="-1" as="geometry">
+            <mxPoint x="-9" y="-11" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="awsAccount" source="lambdaPrepare" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#82b366;dashed=1;dashPattern=8 8;strokeWidth=2;" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7label" connectable="0" parent="e7" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="Generate presigned PUT URL for object key" vertex="1">
+          <mxGeometry relative="1" x="0.15" y="-1" as="geometry">
+            <mxPoint x="-66" y="-14" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e11" edge="1" parent="awsAccount" source="lambdaComplete" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#9673a6;strokeWidth=2;" target="ddb">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1141" y="406" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e11label" connectable="0" parent="e11" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="GetItem, then conditional UpdateItem" vertex="1">
+          <mxGeometry relative="1" x="-0.1" y="1" as="geometry">
+            <mxPoint x="-10" y="8" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e12" edge="1" parent="awsAccount" source="lambdaComplete" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#82b366;strokeWidth=2;" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12label" connectable="0" parent="e12" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="HeadObject(Bucket=item.s3_bucket,&amp;nbsp;&lt;div&gt;Key=item.s3_key)&lt;/div&gt;" vertex="1">
+          <mxGeometry relative="1" x="0.15" y="1" as="geometry">
+            <mxPoint x="10" y="8" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e14" edge="1" parent="awsAccount" source="lambdaPrepare" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 8;" target="cw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e15" edge="1" parent="awsAccount" source="lambdaComplete" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 8;" target="cw">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e16" edge="1" parent="awsAccount" source="iamInvoke" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 8;strokeColor=#d6b656;" target="api">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e19" edge="1" parent="awsAccount" source="prepareEnv" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 8;strokeColor=#b85450;" target="lambdaPrepare">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e20" edge="1" parent="awsAccount" source="completeEnv" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;dashed=1;dashPattern=8 8;strokeColor=#b85450;" target="lambdaComplete">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="ddb" parent="awsAccount" style="sketch=0;outlineConnect=0;fontColor=#232F3E;gradientColor=none;strokeColor=#ffffff;fillColor=#232F3E;dashed=0;verticalLabelPosition=middle;verticalAlign=bottom;align=center;html=1;whiteSpace=wrap;fontSize=11;fontStyle=1;spacing=3;shape=mxgraph.aws4.productIcon;prIcon=mxgraph.aws4.dynamodb;" value="Amazon DynamoDB&#xa;Table: inca-upload-intents&#xa;PK: template_id&#xa;SK: version_id" vertex="1">
+          <mxGeometry height="180" width="90" x="1152" y="286" as="geometry" />
+        </mxCell>
+        <mxCell id="completeLogic" parent="awsAccount" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;verticalAlign=top;fontSize=11;" value="&lt;div style=&quot;text-align: center;&quot;&gt;&lt;b style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;Lambda - Complete logic&lt;/b&gt;&lt;/div&gt;&lt;br&gt;1. Parse JSON body&lt;br&gt;2. Validate template_id and version_id&lt;br&gt;3. GetItem from DynamoDB&lt;br&gt;4. Assert status == PENDING&lt;br&gt;5. HeadObject on S3 using stored bucket + key&lt;br&gt;6. Verify ContentLength == expected_size&lt;br&gt;7. UpdateItem with status = UPLOADED&lt;br&gt;8. Persist uploaded_at, updated_at, actual_size, etag&lt;br&gt;9. Return status = UPLOADED" vertex="1">
+          <mxGeometry height="170" width="280" x="362" y="555" as="geometry" />
+        </mxCell>
+        <mxCell id="prepareLogic" parent="awsAccount" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;align=left;verticalAlign=top;fontSize=11;" value="&lt;div style=&quot;text-align: center;&quot;&gt;&lt;b style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;Lambda - Prepare logic&lt;/b&gt;&lt;/div&gt;&lt;br&gt;1. Parse JSON body&lt;br&gt;2. Validate template_name, file_name, content_type, file_size&lt;br&gt;3. Generate template_id = tpl_...&lt;br&gt;4. Generate version_id = ver_...&lt;br&gt;5. Build key: uploads/raw//.zip&lt;br&gt;6. Put DynamoDB item with status = PENDING&lt;br&gt;7. Generate regional presigned S3 PUT URL&lt;br&gt;8. Return template_id, version_id, status, upload.url, object.key" vertex="1">
+          <mxGeometry height="148" width="340" x="946" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ddbItem" parent="awsAccount" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;fontSize=11;" value="&lt;div style=&quot;text-align: center;&quot;&gt;&lt;b style=&quot;background-color: transparent; color: light-dark(rgb(0, 0, 0), rgb(255, 255, 255));&quot;&gt;DB - Upload intent item&lt;/b&gt;&lt;/div&gt;&lt;br&gt;template_id&lt;br&gt;version_id&lt;br&gt;template_name&lt;br&gt;file_name&lt;br&gt;content_type&lt;br&gt;expected_size&lt;br&gt;s3_bucket&lt;br&gt;s3_key&lt;br&gt;status: PENDING -&amp;gt; UPLOADED&lt;br&gt;created_by / created_at / updated_at&lt;br&gt;uploaded_at / actual_size / etag" vertex="1">
+          <mxGeometry height="220" width="230" x="1082" y="549" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;" target="api">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e1label" connectable="0" parent="e1" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="1. POST /templates/uploads/prepare" vertex="1">
+          <mxGeometry relative="1" x="-0.1" y="-1" as="geometry">
+            <mxPoint x="-30" y="-10" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="routePrepare" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6c8ebf;strokeWidth=2;" target="client">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" edge="1" parent="1" source="client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#82b366;strokeWidth=3;" target="s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9label" connectable="0" parent="e9" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="3. Direct upload to S3&#xa;PUT presigned URL&#xa;Header: Content-Type: application/zip" vertex="1">
+          <mxGeometry relative="1" x="-0.2" y="-1" as="geometry">
+            <mxPoint y="-20" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e10" edge="1" parent="1" source="client" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeWidth=2;exitX=1;exitY=0.7;exitDx=0;exitDy=0;" target="api">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10label" connectable="0" parent="e10" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="4. POST /templates/uploads/complete" vertex="1">
+          <mxGeometry relative="1" x="0.1" y="1" as="geometry">
+            <mxPoint x="-10" y="8" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e13" edge="1" parent="1" source="lambdaComplete" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6c8ebf;strokeWidth=2;" target="client">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13label" connectable="0" parent="e13" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="5. Response: template_id, version_id, status=UPLOADED, object.bucket, object.key, object.size" vertex="1">
+          <mxGeometry relative="1" x="-0.05" y="1" as="geometry">
+            <mxPoint x="-102" y="10" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="routePrepare" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;" value="Route&#xa;POST /templates/uploads/prepare" vertex="1">
+          <mxGeometry height="50" width="250" x="580" y="170" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="api" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="routePrepare">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="routePrepare" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;" target="lambdaPrepare">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3label" connectable="0" parent="e3" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="AWS_PROXY integration" vertex="1">
+          <mxGeometry relative="1" x="0.1" y="-1" as="geometry">
+            <mxPoint x="10" y="-8" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="2" edge="1" parent="1" source="lambdaPrepare" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6c8ebf;strokeWidth=2;" target="routePrepare" value="">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="880" y="185" as="sourcePoint" />
+            <mxPoint x="-50" y="150" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="3" connectable="0" parent="2" style="edgeLabel;html=1;align=center;verticalAlign=middle;resizable=0;" value="2. Response: template_id, version_id, status=PENDING,&lt;div&gt;&amp;nbsp;upload.method=PUT, upload.url, object.key&lt;/div&gt;" vertex="1">
+          <mxGeometry relative="1" x="-0.05" y="1" as="geometry">
+            <mxPoint x="32" y="15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

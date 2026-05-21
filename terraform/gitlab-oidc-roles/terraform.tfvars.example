@@ -1,0 +1,125 @@
+# gitlab-oidc-roles — shared (environment-agnostic) example
+#
+# Copy this file to shared.tfvars and fill in the values marked <...>.
+# This file is committed; shared.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=shared.tfvars
+#
+# The stack provisions all IAM roles assumed by GitLab CI via OIDC for every
+# infrastructure stack (upload, validation, deployment, cognito, WAF, CloudFront,
+# learner-sandbox, ECR push). A single apply here unblocks all CI pipelines.
+#
+# Run this stack once per AWS account (before any other stack).
+# It is applied from both dev and main branches.
+
+# ── AWS + OIDC provider ─────────────────────────────────────────────────────────
+
+aws_region = "eu-west-3"
+
+# If the target account already contains a GitLab OIDC provider, reuse it:
+#   create_oidc_provider       = false
+#   existing_oidc_provider_arn = "arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:oidc-provider/gitlab.revolve.team"
+#
+# If the target account has no OIDC provider yet, let the stack create it:
+#   create_oidc_provider = true
+#   (existing_oidc_provider_arn can be omitted)
+
+create_oidc_provider       = false
+existing_oidc_provider_arn = "arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:oidc-provider/gitlab.revolve.team"
+
+# ── GitLab project scope ────────────────────────────────────────────────────────
+# Only CI jobs from this GitLab project path can assume the IAM roles.
+# Use the exact namespace/project-name as it appears in your GitLab URL.
+
+gitlab_project_path = "inca/inca-auto-deployer"
+
+# Branch patterns allowed to assume the ECR push role.
+gitlab_branch_patterns = [
+  "dev",
+  "main",
+  "master",
+  "feature/*",
+]
+
+# ── ECR push role ───────────────────────────────────────────────────────────────
+# Role assumed by CI to build and push the runner Docker image to ECR.
+
+repository_name = "inca-terraform-runner"
+iam_role_name   = "inca-auto-deployer-gitlab-ecr-push"
+iam_policy_name = "inca-auto-deployer-gitlab-ecr-push"
+
+# ── Upload foundation roles ─────────────────────────────────────────────────────
+
+upload_dev_gitlab_branch_patterns  = ["dev"]
+upload_dev_iam_role_name           = "inca-auto-deployer-gitlab-upload-dev"
+upload_dev_iam_policy_name         = "inca-auto-deployer-gitlab-upload-dev"
+upload_main_gitlab_branch_patterns = ["main", "master"]
+upload_main_iam_role_name          = "inca-auto-deployer-gitlab-upload-main"
+upload_main_iam_policy_name        = "inca-auto-deployer-gitlab-upload-main"
+
+# ── Validation foundation roles ─────────────────────────────────────────────────
+
+validation_dev_gitlab_branch_patterns  = ["dev"]
+validation_dev_iam_role_name           = "inca-auto-deployer-gitlab-validation-dev"
+validation_dev_iam_policy_name         = "inca-auto-deployer-gitlab-validation-dev"
+validation_main_gitlab_branch_patterns = ["main", "master"]
+validation_main_iam_role_name          = "inca-auto-deployer-gitlab-validation-main"
+validation_main_iam_policy_name        = "inca-auto-deployer-gitlab-validation-main"
+
+# ── Deployment foundation roles ─────────────────────────────────────────────────
+
+deployment_dev_gitlab_branch_patterns  = ["dev"]
+deployment_dev_iam_role_name           = "inca-auto-deployer-gitlab-deployment-dev"
+deployment_dev_iam_policy_name         = "inca-auto-deployer-gitlab-deployment-dev"
+deployment_main_gitlab_branch_patterns = ["main", "master"]
+deployment_main_iam_role_name          = "inca-auto-deployer-gitlab-deployment-main"
+deployment_main_iam_policy_name        = "inca-auto-deployer-gitlab-deployment-main"
+
+# ── Cognito roles ───────────────────────────────────────────────────────────────
+
+cognito_dev_gitlab_branch_patterns  = ["dev"]
+cognito_dev_iam_role_name           = "inca-auto-deployer-gitlab-cognito-dev"
+cognito_dev_iam_policy_name         = "inca-auto-deployer-gitlab-cognito-dev"
+cognito_main_gitlab_branch_patterns = ["main", "master"]
+cognito_main_iam_role_name          = "inca-auto-deployer-gitlab-cognito-main"
+cognito_main_iam_policy_name        = "inca-auto-deployer-gitlab-cognito-main"
+
+# ── WAF foundation roles ────────────────────────────────────────────────────────
+
+waf_dev_gitlab_branch_patterns  = ["dev"]
+waf_dev_iam_role_name           = "inca-auto-deployer-gitlab-waf-dev"
+waf_dev_iam_policy_name         = "inca-auto-deployer-gitlab-waf-dev"
+waf_main_gitlab_branch_patterns = ["main", "master"]
+waf_main_iam_role_name          = "inca-auto-deployer-gitlab-waf-main"
+waf_main_iam_policy_name        = "inca-auto-deployer-gitlab-waf-main"
+
+# ── CloudFront foundation roles ─────────────────────────────────────────────────
+
+cloudfront_dev_gitlab_branch_patterns  = ["dev"]
+cloudfront_dev_iam_role_name           = "inca-auto-deployer-gitlab-cloudfront-dev"
+cloudfront_dev_iam_policy_name         = "inca-auto-deployer-gitlab-cloudfront-dev"
+cloudfront_main_gitlab_branch_patterns = ["main", "master"]
+cloudfront_main_iam_role_name          = "inca-auto-deployer-gitlab-cloudfront-main"
+cloudfront_main_iam_policy_name        = "inca-auto-deployer-gitlab-cloudfront-main"
+
+# ── Learner sandbox roles ───────────────────────────────────────────────────────
+# Single shared role used for both dev and main environments.
+
+learner_sandbox_gitlab_branch_patterns = ["dev", "main", "master"]
+learner_sandbox_iam_role_name          = "inca-auto-deployer-gitlab-learner-sandbox"
+learner_sandbox_iam_policy_name        = "inca-auto-deployer-gitlab-learner-sandbox"
+
+# ── GitLab OIDC admin role ──────────────────────────────────────────────────────
+# Role assumed by CI to deploy this stack itself (manages IAM/OIDC resources).
+
+gitlab_oidc_admin_gitlab_branch_patterns = ["dev", "main", "master"]
+gitlab_oidc_admin_iam_role_name          = "inca-auto-deployer-gitlab-oidc-admin"
+gitlab_oidc_admin_iam_policy_name        = "inca-auto-deployer-gitlab-oidc-admin"
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "gitlab-oidc-roles"
+  environment = "shared"
+}

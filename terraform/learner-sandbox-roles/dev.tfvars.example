@@ -1,0 +1,48 @@
+# learner-sandbox-roles — dev environment example
+#
+# Copy this file to dev.tfvars and fill in the values marked <...>.
+# This file is committed; dev.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=dev.tfvars
+#
+# The stack provisions N IAM sandbox roles (inca-learner-sandbox-001, -002, ...)
+# in the target AWS account. Learners assume these roles to run Terraform blueprints
+# in an isolated, permission-bounded environment.
+#
+# Deployment sequence:
+#   Phase 1 (CI simulation): add the GitLab CI deployer role so CI can test
+#     the assume-role chain without a real ECS task.
+#   Phase 2 (production): also add the ECS deployment task role ARN once
+#     deployment-foundation is applied, so the runner can assume sandbox roles.
+
+aws_region  = "eu-west-3"
+environment = "dev"
+
+# ── Sandbox role count ──────────────────────────────────────────────────────────
+# Number of IAM sandbox roles to create. One role per concurrent learner slot.
+# Roles are numbered sequentially: inca-learner-sandbox-001 to -<count>.
+
+sandbox_role_count = 3
+
+# ── Deployer ARNs ───────────────────────────────────────────────────────────────
+# IAM roles allowed to assume the sandbox roles via sts:AssumeRole.
+#
+# Phase 1 — GitLab CI deployer role:
+#   arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/inca-auto-deployer-gitlab-learner-sandbox
+#
+# Phase 2 — add the ECS task role from deployment-foundation outputs:
+#   arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/inca-deployment-task-role-dev
+#   (visible in CI job logs after apply_deployment_dev succeeds)
+
+deployer_role_arns = [
+  "arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/inca-auto-deployer-gitlab-learner-sandbox",
+  "arn:aws:iam::<YOUR_AWS_ACCOUNT_ID>:role/inca-deployment-task-role-dev",
+]
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "learner-sandbox-roles"
+  environment = "dev"
+}

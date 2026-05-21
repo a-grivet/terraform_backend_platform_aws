@@ -1,0 +1,25 @@
+# Copy to dev.tfvars.local and fill in real values.
+# dev.tfvars.local is gitignored — never commit passwords.
+test_users = {
+  "learner-001" = {
+    email              = "learner001@example.com"
+    aws_account_id     = "123456789012"          # target AWS account (or central account for sandbox sim)
+    role_name          = "inca-learner-sandbox-001"
+    cohort_id          = "cohort-2026-01"
+    temporary_password = "Change-Me-001!"
+  }
+  "learner-002" = {
+    email              = "learner002@example.com"
+    aws_account_id     = "123456789012"
+    role_name          = "inca-learner-sandbox-002"
+    cohort_id          = "cohort-2026-01"
+    temporary_password = "Change-Me-002!"
+  }
+  "learner-003" = {
+    email              = "learner003@example.com"
+    aws_account_id     = "123456789012"
+    role_name          = "inca-learner-sandbox-003"
+    cohort_id          = "cohort-2026-01"
+    temporary_password = "Change-Me-003!"
+  }
+}

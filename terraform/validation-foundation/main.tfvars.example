@@ -1,0 +1,71 @@
+# validation-foundation — main environment example
+#
+# Copy this file to main.tfvars and fill in the values marked <...>.
+# This file is committed; main.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=main.tfvars
+#
+# Differences from dev:
+#   - environment = "main"
+#   - validation_vpc_cidr_block uses 10.43.0.0/16 (avoids overlap with dev 10.42.0.0/16)
+#   - vpc_flow_logs_retention_days = 90 (longer retention for production)
+
+aws_region  = "eu-west-3"
+environment = "main"
+
+# ── EventBridge ─────────────────────────────────────────────────────────────────
+
+event_bus_name        = "default"
+raw_upload_key_prefix = "blueprints/pending/"
+
+# ── Two-phase rollout ───────────────────────────────────────────────────────────
+
+enable_validation_runtime = true
+enable_validation_trigger = true
+
+# ── Runner image ────────────────────────────────────────────────────────────────
+
+validation_runner_image_repository = "<YOUR_AWS_ACCOUNT_ID>.dkr.ecr.eu-west-3.amazonaws.com/inca-terraform-runner"
+
+# ── ECS task sizing ─────────────────────────────────────────────────────────────
+
+task_cpu    = 1024
+task_memory = 2048
+
+# ── Network ─────────────────────────────────────────────────────────────────────
+# Use a distinct CIDR block from dev (10.42.x.x) to avoid routing conflicts
+# if both environments ever share the same account or VPC peering.
+
+assign_public_ip = false
+
+create_validation_network       = true
+validation_vpc_cidr_block       = "10.43.0.0/16"
+validation_private_subnet_cidrs = ["10.43.1.0/24", "10.43.2.0/24"]
+
+subnet_ids         = []
+security_group_ids = []
+
+# ── VPC endpoints ───────────────────────────────────────────────────────────────
+
+manage_private_service_endpoints = true
+private_route_table_ids          = []
+interface_endpoint_subnet_ids    = []
+
+# ── VPC Flow Logs ───────────────────────────────────────────────────────────────
+# Longer retention for production.
+
+enable_vpc_flow_logs         = true
+vpc_flow_logs_traffic_type   = "ALL"
+vpc_flow_logs_retention_days = 90
+
+# ── Alerting ────────────────────────────────────────────────────────────────────
+
+alert_email = "<YOUR_EMAIL>"
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "validation-foundation"
+  environment = "main"
+}

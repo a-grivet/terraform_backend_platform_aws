@@ -1,0 +1,230 @@
+# Runner Image Pipeline
+#
+# Builds, tests, and publishes the Terraform runner image used by the
+# validation runtime. This pipeline should only mutate ECR when the runner
+# image content or this pipeline definition changes.
+#
+# It does not deploy application infrastructure.
+
+stages:
+  - auth
+  - test
+  - pre_publish
+  - publish
+
+variables:
+  AWS_ACCOUNT_ID: "066122607629"
+  AWS_EC2_METADATA_DISABLED: "true"
+  AWS_REGION: "eu-west-3"
+  AWS_ROLE_ARN: "arn:aws:iam::066122607629:role/inca-auto-deployer-gitlab-ecr-push"
+  AWS_ROLE_ARN_RUNNER: ""
+  ECR_REPOSITORY: "inca-terraform-runner"
+  TERRAFORM_VERSION: "1.14.7"
+  TERRAFORM_AWS_PROVIDER_VERSION: "5.100.0"
+  TFLINT_VERSION: "0.56.0"
+  TFLINT_AWS_RULESET_VERSION: "0.40.0"
+
+# Paths that trigger all runner image jobs.
+.rules_runner_changes:
+  rules:
+    - changes:
+        - Dockerfile
+        - config/**/*
+        - scripts/runner/**/*
+        - tests/fixtures/blueprints/**/*
+        - ci/quality/.tflint.hcl
+        - .gitlab-ci.yml
+        - ci/_templates.yml
+        - ci/runner.yml
+
+.aws_oidc_base:
+  image:
+    name: public.ecr.aws/aws-cli/aws-cli:2.15.39
+    entrypoint: [""]
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.revolve.team
+  before_script:
+    - aws --version
+    - export EFFECTIVE_AWS_ROLE_ARN="${AWS_ROLE_ARN_RUNNER:-$AWS_ROLE_ARN}"
+    - >
+      export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s"
+      $(aws sts assume-role-with-web-identity
+      --role-arn ${EFFECTIVE_AWS_ROLE_ARN}
+      --role-session-name "GitLabRunner-${CI_PROJECT_ID}-${CI_PIPELINE_ID}"
+      --web-identity-token ${GITLAB_OIDC_TOKEN}
+      --duration-seconds 3600
+      --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]'
+      --output text))
+
+verify_runner_aws_oidc_authentication:
+  extends: .aws_oidc_base
+  stage: auth
+  allow_failure: false
+  rules: !reference [.rules_runner_changes, rules]
+  script:
+    - aws sts get-caller-identity
+
+check_runner_shell_scripts_syntax:
+  stage: test
+  image: bash:5.2
+  rules: !reference [.rules_runner_changes, rules]
+  script:
+    - bash -n scripts/runner/*.sh scripts/ci/*.sh
+
+test_runner_offline_provider_supported_package:
+  stage: test
+  image:
+    name: hashicorp/terraform:1.14.7
+    entrypoint: [""]
+  rules: !reference [.rules_runner_changes, rules]
+  before_script:
+    - apk add --no-cache bash curl unzip
+  script:
+    - bash tests/integration/test_offline_provider_mirror.sh tests/fixtures/blueprints/success-aws-lab success
+
+test_runner_offline_provider_unsupported_package:
+  stage: test
+  image:
+    name: hashicorp/terraform:1.14.7
+    entrypoint: [""]
+  rules: !reference [.rules_runner_changes, rules]
+  before_script:
+    - apk add --no-cache bash
+  script:
+    - bash tests/integration/test_offline_provider_mirror.sh tests/fixtures/blueprints/failure-unsupported-provider-lab failure
+
+check_runner_image_in_ecr:
+  extends: .aws_oidc_base
+  stage: pre_publish
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - Dockerfile
+        - config/**/*
+        - scripts/runner/**/*
+        - tests/fixtures/blueprints/**/*
+        - ci/quality/.tflint.hcl
+        - ci/runner.yml
+  script:
+    - |
+      case "${CI_COMMIT_BRANCH}" in
+        dev)         ENV_IMAGE_TAG="dev" ;;
+        main|master) ENV_IMAGE_TAG="main" ;;
+        *) echo "Unsupported branch '${CI_COMMIT_BRANCH}'" && exit 1 ;;
+      esac
+    - |
+      if aws ecr describe-images \
+          --repository-name "${ECR_REPOSITORY}" \
+          --region "${AWS_REGION}" \
+          --image-ids "imageTag=${CI_COMMIT_SHA}" > /dev/null 2>&1; then
+        echo "Image ${CI_COMMIT_SHA} already in ECR — retagging mutable tags"
+        MANIFEST=$(aws ecr batch-get-image \
+          --repository-name "${ECR_REPOSITORY}" \
+          --region "${AWS_REGION}" \
+          --image-ids "imageTag=${CI_COMMIT_SHA}" \
+          --query 'images[0].imageManifest' \
+          --output text)
+        if ! PUT_RESULT=$(aws ecr put-image \
+          --repository-name "${ECR_REPOSITORY}" \
+          --region "${AWS_REGION}" \
+          --image-tag "${ENV_IMAGE_TAG}" \
+          --image-manifest "${MANIFEST}" 2>&1); then
+          echo "${PUT_RESULT}" | grep -q "ImageAlreadyExistsException" \
+            || { echo "${PUT_RESULT}" >&2; exit 1; }
+          echo "Tag '${ENV_IMAGE_TAG}' already up to date"
+        fi
+        if [ "${ENV_IMAGE_TAG}" = "main" ]; then
+          if ! PUT_RESULT=$(aws ecr put-image \
+            --repository-name "${ECR_REPOSITORY}" \
+            --region "${AWS_REGION}" \
+            --image-tag "latest" \
+            --image-manifest "${MANIFEST}" 2>&1); then
+            echo "${PUT_RESULT}" | grep -q "ImageAlreadyExistsException" \
+              || { echo "${PUT_RESULT}" >&2; exit 1; }
+            echo "Tag 'latest' already up to date"
+          fi
+        fi
+        echo "SKIP_KANIKO=true" > ecr_check.env
+      else
+        echo "Image ${CI_COMMIT_SHA} not found in ECR — kaniko will build"
+        echo "SKIP_KANIKO=false" > ecr_check.env
+      fi
+  artifacts:
+    reports:
+      dotenv: ecr_check.env
+    expire_in: 1 hour
+
+publish_runner_image_to_ecr:
+  stage: publish
+  needs:
+    - job: check_runner_image_in_ecr
+      artifacts: true
+    - check_runner_shell_scripts_syntax
+    - test_runner_offline_provider_supported_package
+    - test_runner_offline_provider_unsupported_package
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.revolve.team
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master"'
+      changes:
+        - Dockerfile
+        - config/**/*
+        - scripts/runner/**/*
+        - tests/fixtures/blueprints/**/*
+        - ci/quality/.tflint.hcl
+        - ci/runner.yml
+  before_script:
+    - export EFFECTIVE_AWS_ROLE_ARN="${AWS_ROLE_ARN_RUNNER:-$AWS_ROLE_ARN}"
+    - export AWS_ROLE_ARN="${EFFECTIVE_AWS_ROLE_ARN}"
+    - export AWS_DEFAULT_REGION="${AWS_REGION}"
+    - export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+    - export DOCKER_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}"
+    - export AWS_WEB_IDENTITY_TOKEN_FILE="/kaniko/web-identity-token"
+    - printf '%s' "${GITLAB_OIDC_TOKEN}" > "${AWS_WEB_IDENTITY_TOKEN_FILE}"
+    - mkdir -p /kaniko/.docker
+    - |
+      cat > /kaniko/.docker/config.json <<EOF
+      {
+        "credHelpers": {
+          "${ECR_REGISTRY}": "ecr-login"
+        }
+      }
+      EOF
+  script:
+    - |
+      if [ "${SKIP_KANIKO:-false}" = "true" ]; then
+        echo "Runner image for ${CI_COMMIT_SHA} already published — skipping build"
+        exit 0
+      fi
+    - |
+      case "${CI_COMMIT_BRANCH}" in
+        dev)
+          ENV_IMAGE_TAG="dev"
+          ;;
+        main|master)
+          ENV_IMAGE_TAG="main"
+          ;;
+        *)
+          echo "Unsupported branch '${CI_COMMIT_BRANCH}' for runner image publication."
+          exit 1
+          ;;
+      esac
+    - |
+      DESTINATIONS="--destination=${DOCKER_IMAGE}:${CI_COMMIT_SHA} --destination=${DOCKER_IMAGE}:${ENV_IMAGE_TAG}"
+      if [ "${ENV_IMAGE_TAG}" = "main" ]; then
+        DESTINATIONS="${DESTINATIONS} --destination=${DOCKER_IMAGE}:latest"
+      fi
+      /kaniko/executor \
+        --context "${CI_PROJECT_DIR}" \
+        --dockerfile "${CI_PROJECT_DIR}/Dockerfile" \
+        --push-ignore-immutable-tag-errors=true \
+        --build-arg TERRAFORM_VERSION=${TERRAFORM_VERSION} \
+        --build-arg TERRAFORM_AWS_PROVIDER_VERSION=${TERRAFORM_AWS_PROVIDER_VERSION} \
+        --build-arg TFLINT_VERSION=${TFLINT_VERSION} \
+        --build-arg TFLINT_AWS_RULESET_VERSION=${TFLINT_AWS_RULESET_VERSION} \
+        ${DESTINATIONS}

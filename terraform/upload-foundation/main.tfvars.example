@@ -1,0 +1,71 @@
+# upload-foundation — main environment example
+#
+# Copy this file to main.tfvars and fill in the values marked <...>.
+# This file is committed; main.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=main.tfvars
+
+aws_region           = "eu-west-3"
+upload_bucket_region = "eu-west-3"
+environment          = "main"
+
+# ── Resource naming ─────────────────────────────────────────────────────────────
+
+dynamodb_table_name           = "inca-upload-intents-main"
+lambda_role_name              = "prepare-template-upload-lambda-role-main"
+lambda_policy_name            = "prepare-template-upload-lambda-policy-main"
+lambda_function_name          = "prepare-template-upload-main"
+complete_lambda_role_name     = "complete-template-upload-lambda-role-main"
+complete_lambda_policy_name   = "complete-template-upload-lambda-policy-main"
+complete_lambda_function_name = "complete-template-upload-main"
+http_api_name                 = "inca-upload-api-main"
+
+# ── Lambda runtime ──────────────────────────────────────────────────────────────
+
+lambda_runtime         = "python3.12"
+lambda_handler         = "handler.lambda_handler"
+lambda_timeout_seconds = 10
+lambda_memory_size_mb  = 256
+
+# ── API Gateway ─────────────────────────────────────────────────────────────────
+# Use a named stage (not "$default") so CloudFront can route /api/* to this API.
+
+http_api_stage_name             = "api"
+http_api_throttling_burst_limit = 50
+http_api_throttling_rate_limit  = 100
+
+# Optional: custom domain + CORS (uncomment when DNS and ACM are ready).
+# http_api_custom_domain_name = "api.<YOUR_SUBDOMAIN>.example.com"
+# hosted_zone_id              = "<ROUTE53_HOSTED_ZONE_ID>"           # e.g. Z1234567890ABC
+# api_allowed_cors_origins    = ["https://<YOUR_FRONTEND_DOMAIN>"]
+# api_allowed_cors_methods    = ["POST"]
+# api_allowed_cors_headers    = ["Content-Type", "Authorization"]
+# api_allow_credentials       = false
+# api_cors_max_age_seconds    = 300
+
+# ── Upload constraints ──────────────────────────────────────────────────────────
+
+presigned_url_expiration_seconds = 900
+max_upload_size_bytes            = 20971520
+
+# ── S3 CORS ─────────────────────────────────────────────────────────────────────
+
+allowed_cors_origins = ["https://<YOUR_FRONTEND_DOMAIN>"]
+
+# ── Encryption / versioning ─────────────────────────────────────────────────────
+
+enable_versioning = false
+encrypt_with_kms  = false
+# kms_key_arn     = "arn:aws:kms:eu-west-3:<YOUR_AWS_ACCOUNT_ID>:key/<KEY_ID>"
+
+# ── Alerting ────────────────────────────────────────────────────────────────────
+
+alert_email = "<YOUR_EMAIL>"
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "upload-foundation"
+  environment = "main"
+}

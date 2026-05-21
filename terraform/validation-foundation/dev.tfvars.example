@@ -1,0 +1,99 @@
+# validation-foundation — dev environment example
+#
+# Copy this file to dev.tfvars and fill in the values marked <...>.
+# This file is committed; dev.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=dev.tfvars
+#
+# The stack provisions the blueprint validation flow:
+#   - EventBridge rule triggered by S3 ObjectCreated events on blueprints/pending/*
+#   - ECS Fargate cluster + task running validate.sh against the uploaded ZIP
+#   - IAM roles, CloudWatch log groups
+#   - Optional: dedicated private VPC with VPC endpoints (no NAT Gateway)
+#
+# Two-phase rollout flags:
+#   enable_validation_runtime = true  → creates ECS, IAM, EventBridge target
+#   enable_validation_trigger = true  → activates the EventBridge rule (live traffic)
+# Set both to false during initial scaffolding before the runner image is ready.
+#
+# The validation runner image tag is injected by CI via:
+#   TF_VAR_validation_runner_image_tag="${CI_COMMIT_SHA}"
+# For a manual plan/apply, pass:
+#   terraform plan -var="validation_runner_image_tag=<40-char-commit-sha>"
+
+aws_region  = "eu-west-3"
+environment = "dev"
+
+# ── EventBridge ─────────────────────────────────────────────────────────────────
+
+event_bus_name        = "default"
+raw_upload_key_prefix = "blueprints/pending/"
+
+# ── Two-phase rollout ───────────────────────────────────────────────────────────
+# Phase 1: set both to false to deploy the stack without creating ECS resources.
+# Phase 2: set enable_validation_runtime = true once the runner image is pushed.
+# Phase 3: set enable_validation_trigger = true to activate live S3 → ECS triggering.
+
+enable_validation_runtime = true
+enable_validation_trigger = true
+
+# ── Runner image ────────────────────────────────────────────────────────────────
+# ECR repository URI without tag. Required when enable_validation_runtime = true.
+# Format: <AWS_ACCOUNT_ID>.dkr.ecr.<REGION>.amazonaws.com/<REPO_NAME>
+
+validation_runner_image_repository = "<YOUR_AWS_ACCOUNT_ID>.dkr.ecr.eu-west-3.amazonaws.com/inca-terraform-runner"
+
+# ── ECS task sizing ─────────────────────────────────────────────────────────────
+
+task_cpu    = 1024
+task_memory = 2048
+
+# ── Network: dedicated VPC ──────────────────────────────────────────────────────
+# Recommended for isolated deployments. The stack creates its own private VPC,
+# subnets, route tables, and security groups.
+# Set create_validation_network = false and supply subnet_ids + security_group_ids
+# to integrate this stack into an existing platform VPC instead.
+
+assign_public_ip = false
+
+create_validation_network       = true
+validation_vpc_cidr_block       = "10.42.0.0/16"
+validation_private_subnet_cidrs = ["10.42.1.0/24", "10.42.2.0/24"]
+# validation_availability_zones = ["eu-west-3a", "eu-west-3b"]  # optional explicit AZ override
+
+# When integrating into an existing VPC instead of creating a dedicated one:
+# create_validation_network = false
+# subnet_ids                = ["subnet-<ID1>", "subnet-<ID2>"]
+# security_group_ids        = ["sg-<ID>"]
+
+subnet_ids         = []
+security_group_ids = []
+
+# ── VPC endpoints ───────────────────────────────────────────────────────────────
+# Enable to run the validation runner in fully private subnets without a NAT
+# Gateway. The stack creates interface endpoints for ECR, S3, DynamoDB, CloudWatch.
+
+manage_private_service_endpoints = true
+# vpc_id                         = null   # auto-detected when create_validation_network = true
+private_route_table_ids          = []
+interface_endpoint_subnet_ids    = []
+
+# ── VPC Flow Logs ───────────────────────────────────────────────────────────────
+# Dedicated validation VPCs always enable Flow Logs.
+# Set enable_vpc_flow_logs = true only when wiring to an existing VPC via vpc_id.
+
+enable_vpc_flow_logs         = true
+vpc_flow_logs_traffic_type   = "ALL"
+vpc_flow_logs_retention_days = 30
+
+# ── Alerting ────────────────────────────────────────────────────────────────────
+
+alert_email = "<YOUR_EMAIL>"
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "validation-foundation"
+  environment = "dev"
+}

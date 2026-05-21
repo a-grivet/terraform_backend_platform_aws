@@ -1,0 +1,76 @@
+# -----------------------------------------------------------------------------
+# Terraform local state and working directories
+# -----------------------------------------------------------------------------
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+
+# Keep lock files versioned only when intentionally tracked by the team.
+# In this repository we prefer not to commit local lock files generated during
+# experimentation until the workflow is stabilized.
+**/.terraform.lock.hcl
+!/terraform/ecr/.terraform.lock.hcl
+
+# -----------------------------------------------------------------------------
+# Local Terraform variable files
+# These files often contain account-specific, environment-specific or sensitive
+# values and should stay out of version control.
+# -----------------------------------------------------------------------------
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+
+# -----------------------------------------------------------------------------
+# Terraform plan files and overrides
+# -----------------------------------------------------------------------------
+tfplan
+*.tfplan
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# -----------------------------------------------------------------------------
+# Local environment files
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# -----------------------------------------------------------------------------
+# AI assistant local configuration
+# -----------------------------------------------------------------------------
+.agents/
+.claude/
+.codex/
+
+# -----------------------------------------------------------------------------
+# IDE and operating system artifacts
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# -----------------------------------------------------------------------------
+# Python local artifacts
+# -----------------------------------------------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+terraform/upload-foundation/*.zip
+terraform/deployment-foundation/*.zip
+
+# -----------------------------------------------------------------------------
+# Draw.io and office temporary/backup files
+# -----------------------------------------------------------------------------
+.$*.drawio.bkp
+*.drawio.bkp
+~$*

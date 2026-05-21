@@ -1,0 +1,35 @@
+# deployment-foundation — main environment example
+#
+# Copy this file to main.tfvars and fill in the values marked <...>.
+# This file is committed; main.tfvars is gitignored.
+#
+# CI selects this stack with:
+#   terraform plan -var-file=main.tfvars
+#
+# The runner image tag is injected by CI via:
+#   TF_VAR_deployment_runner_image_tag="${CI_COMMIT_SHA}"
+# For a manual plan/apply, pass:
+#   terraform plan -var="deployment_runner_image_tag=<40-char-commit-sha>"
+
+aws_region  = "eu-west-3"
+environment = "main"
+
+# ── Runner image ────────────────────────────────────────────────────────────────
+
+deployment_runner_image_repository = "<YOUR_AWS_ACCOUNT_ID>.dkr.ecr.eu-west-3.amazonaws.com/inca-terraform-runner"
+
+# ── ECS task sizing ─────────────────────────────────────────────────────────────
+
+task_cpu    = 1024
+task_memory = 2048
+
+# ── Alerting ────────────────────────────────────────────────────────────────────
+
+alert_email = "<YOUR_EMAIL>"
+
+tags = {
+  managed_by  = "terraform"
+  project     = "inca-auto-deployer"
+  component   = "deployment-foundation"
+  environment = "main"
+}

@@ -1,0 +1,117 @@
+# Checkov configuration for inca-auto-deployer.
+#
+# This file controls which checks run and which are permanently skipped.
+# Each skip is intentional and documented with a rationale below.
+#
+# Checkov reads this file automatically when run from the project root.
+# CI job: scan_terraform in ci/inca-pipeline.yml (allow_failure: true while
+# the baseline is established).
+
+framework:
+  - terraform
+
+directory:
+  - terraform
+
+skip-check:
+  # ── S3 ─────────────────────────────────────────────────────────────────────
+
+  # No dedicated logging bucket is provisioned in this stack.
+  # S3 server access logs would require a second bucket with its own lifecycle
+  # management; CloudTrail data events cover audit needs at lower overhead.
+  - CKV_AWS_18    # S3 access logging not enabled
+
+  # No cross-region replication. There is no DR requirement in scope for the
+  # current single-region deployment.
+  - CKV_AWS_144   # S3 cross-region replication not enabled
+
+  # MFA delete requires enabling it via the S3 API with the bucket-owner root
+  # credentials, which cannot be done through a Terraform resource block. It is
+  # therefore deliberately not configured here.
+  - CKV_AWS_21    # S3 MFA delete not enabled
+
+  # ── DynamoDB ───────────────────────────────────────────────────────────────
+
+  # Upload intents have a short lifecycle (pending → validated/rejected) and do
+  # not require point-in-time recovery. PITR can be enabled separately if the
+  # retention requirement changes.
+  - CKV_AWS_28    # DynamoDB PITR not enabled
+
+  # Deletion protection is not enforced here: the table is managed by Terraform
+  # and the destroy flow must be able to remove it cleanly.
+  - CKV2_AWS_118  # DynamoDB table deletion protection not enabled
+
+  # ── Lambda ─────────────────────────────────────────────────────────────────
+
+  # The upload Lambdas front a public HTTP API Gateway. Placing them inside a
+  # VPC would require a NAT Gateway to reach the DynamoDB and S3 service
+  # endpoints, adding cost and operational complexity without a security benefit
+  # for this architecture (both Lambdas already use least-privilege IAM).
+  - CKV_AWS_117   # Lambda function not configured with a VPC
+
+  # Dead-letter queue is not configured. The upstream caller (API Gateway) is
+  # synchronous; any invocation failure is surfaced immediately to the caller
+  # as an HTTP error. Async DLQ retry would not improve the upload contract.
+  - CKV_AWS_116   # Lambda dead-letter queue not configured
+
+  # Reserved concurrency is not set. The upload Lambda scales freely with API
+  # demand. A concurrency cap would cause throttling under load. Throttling
+  # limits should be managed at the API Gateway stage level instead.
+  - CKV_AWS_115   # Lambda reserved concurrency not configured
+
+  # Code-signing policy is not enforced. Lambda package provenance is guaranteed
+  # by the GitLab CI artifact guardrail (pipeline ID + commit SHA recorded in
+  # plan-metadata.env and verified before apply).
+  - CKV_AWS_272   # Lambda code-signing not configured
+
+  # X-Ray tracing is not enabled. The current observability strategy relies on
+  # structured CloudWatch Logs; X-Ray adds cost without a clear benefit for the
+  # synchronous upload latency path at this scale.
+  - CKV_AWS_50    # Lambda X-Ray tracing not enabled
+
+  # ── API Gateway (HTTP API v2) ───────────────────────────────────────────────
+
+  # No dedicated access log destination ARN is configured on the stage.
+  # The CloudWatch Log Group created for each Lambda already covers request
+  # tracing; a duplicate API Gateway access log group would double storage cost
+  # with overlapping data.
+  - CKV2_AWS_29   # API Gateway v2 access log not enabled
+
+  # ── CloudWatch Log Groups ───────────────────────────────────────────────────
+
+  # KMS encryption on CloudWatch Log Groups requires a customer-managed KMS key
+  # with the logs service principal in its key policy. The current stack does not
+  # provision a per-region CMK for logs; AWS managed encryption at rest is used.
+  - CKV_AWS_158   # CloudWatch log group not encrypted with KMS CMK
+
+  # ── ECS ────────────────────────────────────────────────────────────────────
+
+  # ECS Container Insights is disabled for cost control on the dev/main
+  # environments. Structured task logs reach CloudWatch via awslogs; Container
+  # Insights metrics would be a redundant cost for this stack size.
+  - CKV_AWS_65    # ECS cluster Container Insights not enabled
+
+  # ── Security Groups ─────────────────────────────────────────────────────────
+
+  # Validation runner tasks and VPC endpoint security groups have unrestricted
+  # egress (0.0.0.0/0). This is intentional: tasks must reach multiple private
+  # interface endpoints (ECR API, ECR DKR, CloudWatch Logs) and the S3/DynamoDB
+  # gateway endpoints, all of which use port 443 but are resolved at the AWS
+  # network level rather than to a predictable CIDR range.
+  - CKV_AWS_25    # Security group allows unrestricted outbound traffic
+
+  # ── CloudFront ──────────────────────────────────────────────────────────────
+
+  # CloudFront access logs (distinct from WAF logs) require a dedicated S3 bucket
+  # with specific ACL configuration. WAF logs already capture all security-relevant
+  # traffic to CloudWatch. CloudFront access logs would add cost without
+  # additional security value for this architecture.
+  - CKV_AWS_86    # CloudFront access logging not enabled
+
+  # CloudFront distributions front API Gateway origins and do not serve HTML.
+  # A default root object (e.g. index.html) is only meaningful for static websites.
+  - CKV_AWS_310   # CloudFront default root object not configured
+
+  # API Gateway WAF check is superseded by the CloudFront WAF (CKV2_AWS_42 passes).
+  # This check targets direct WAF-on-APIGW which is not supported for HTTP API v2.
+  - CKV2_AWS_31   # API Gateway WAF not attached (HTTP API v2 — WAF applied at CloudFront layer)
